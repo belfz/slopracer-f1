@@ -53,6 +53,8 @@ pub struct BiosInfo {
     pub truecolor: bool,
     pub enhanced: bool,
     pub audio: bool,
+    /// Name of the connected gamepad, if any.
+    pub pad: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -122,12 +124,14 @@ fn script_text(key: &str, info: &BiosInfo, t: f32) -> ScriptLine {
             (vec![l("AUDIO  "), v("8-voice wavetable synth".into())], Some(status))
         }
         "input" => {
-            let (text, status) = if info.enhanced {
-                ("kitty keyboard protocol, key release tracking", ("OK", Tone::Ok))
+            let (text, status) = if let Some(name) = &info.pad {
+                (format!("gamepad: {name}, analog steering"), ("OK", Tone::Ok))
+            } else if info.enhanced {
+                ("kitty keyboard protocol, key release tracking".into(), ("OK", Tone::Ok))
             } else {
-                ("legacy keyboard: auto-throttle engaged", ("LIMITED", Tone::Warn))
+                ("legacy keyboard: auto-throttle engaged".into(), ("LIMITED", Tone::Warn))
             };
-            (vec![l("INPUT  "), v(text.into())], Some(status))
+            (vec![l("INPUT  "), v(text)], Some(status))
         }
         "cart" => (vec![l("SLOT A "), v("\"PEGASUS F1\" 4 Mbit ROM · checksum 7F3A".into())], None),
         "boot" => {
@@ -180,7 +184,7 @@ mod tests {
 
     #[test]
     fn bios_types_out_and_reports_status() {
-        let info = BiosInfo { cols: 140, rows: 42, res: (384, 216), mode: "PIXELS", truecolor: true, enhanced: false, audio: true };
+        let info = BiosInfo { cols: 140, rows: 42, res: (384, 216), mode: "PIXELS", truecolor: true, enhanced: false, audio: true, pad: None };
         let early = bios_lines(0.5, &info);
         let late = bios_lines(TOTAL - 0.01, &info);
         assert!(early.len() < late.len());
@@ -188,6 +192,15 @@ mod tests {
         assert!(text.contains("4096K"), "{text}");
         assert!(text.contains("LIMITED"));
         assert!(text.contains("384x216"));
+    }
+
+    #[test]
+    fn gamepad_lifts_the_input_limit() {
+        let pad = Some("PS4 Controller".to_string());
+        let info = BiosInfo { cols: 140, rows: 42, res: (384, 216), mode: "PIXELS", truecolor: true, enhanced: false, audio: true, pad };
+        let text: String = bios_lines(TOTAL - 0.01, &info).iter().flat_map(|l| l.runs.iter().map(|r| r.0.clone())).collect();
+        assert!(text.contains("gamepad: PS4 Controller"), "{text}");
+        assert!(!text.contains("LIMITED"));
     }
 
     #[test]

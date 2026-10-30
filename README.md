@@ -62,6 +62,29 @@ key releases, so you hold `↑` to accelerate. In other terminals (e.g. macOS
 Terminal.app) the game switches to *auto-throttle*: the car accelerates on its
 own and you hold `↓` to brake.
 
+## Gamepad
+
+A PlayStation 4 (DualShock 4) controller works out of the box, as do DualSense,
+Xbox and most other SDL-compatible pads (via [gilrs](https://gitlab.com/gilrs-project/gilrs)).
+It works in any terminal, and it brings analog steering and real throttle
+control even where the keyboard falls back to auto-throttle. Plug it in or pair
+it before or during play: the menu shows `Input: gamepad · …` once it is seen.
+
+| Button | Action |
+| --- | --- |
+| Left stick / D-pad | Steer (analog on the stick); navigate menus |
+| `R2` / `✕` / D-pad `↑` | Accelerate |
+| `L2` / `□` / D-pad `↓` | Brake |
+| `L1` / `R1` | Shift gear |
+| `Options` | Pause / resume; start from the menu |
+| `✕` | Start race; back to menu from the results |
+| `△` | Restart (paused or results) |
+| `○` | Quit to menu (paused) |
+
+To pair a DualShock 4 with a Mac over Bluetooth, hold `Share` + `PS` until the
+light bar flashes quickly, then pick *DUALSHOCK 4 Wireless Controller* in
+System Settings → Bluetooth. A micro-USB cable also works, with no pairing needed.
+
 ## Tracks
 
 - **Neon Sakura**: synthwave sunset with a striped retro sun, a neon grid

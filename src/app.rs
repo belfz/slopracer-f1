@@ -4,6 +4,7 @@ use crate::audio::{Audio, Sfx};
 use crate::boot::Boot;
 use crate::gfx::Mode;
 use crate::input::{Btn, Keys};
+use crate::pad::{Pad, Press};
 use crate::race::{Controls, Race};
 use crate::settings::Settings;
 use crate::track::{all_tracks, Track};
@@ -41,6 +42,7 @@ pub struct App {
     pub race: Option<Race>,
     pub paused: bool,
     pub keys: Keys,
+    pub pad: Pad,
     pub audio: Audio,
     pub muted: bool,
     pub truecolor: bool,
@@ -72,6 +74,7 @@ impl App {
             race: None,
             paused: false,
             keys: Keys::new(enhanced),
+            pad: Pad::new(),
             audio: Audio::new(muted),
             muted,
             truecolor,
@@ -174,6 +177,40 @@ impl App {
         }
     }
 
+    /// Without key-release events holding a pedal is unreliable, so throttle
+    /// is automatic, unless a gamepad is there to hold it.
+    pub fn auto_throttle(&self) -> bool {
+        !self.keys.enhanced && !self.pad.connected()
+    }
+
+    /// Route controller button presses through the same menu/race actions as
+    /// their keyboard equivalents.
+    pub fn poll_pad(&mut self) {
+        for p in self.pad.poll() {
+            let code = match (p, self.screen) {
+                (_, Screen::Boot) => {
+                    self.finish_boot();
+                    continue;
+                }
+                (Press::Up, _) => KeyCode::Up,
+                (Press::Down, _) => KeyCode::Down,
+                (Press::Left, _) => KeyCode::Left,
+                (Press::Right, _) => KeyCode::Right,
+                (Press::Confirm, _) | (Press::Start, Screen::Menu) => KeyCode::Enter,
+                (Press::Start, _) => KeyCode::Esc,
+                // Circle must not quit the game from the menu.
+                (Press::Back, Screen::Menu) => continue,
+                (Press::Back, _) => KeyCode::Char('q'),
+                (Press::Restart, _) => KeyCode::Char('r'),
+                (Press::Shift, _) => KeyCode::Char('g'),
+            };
+            match self.screen {
+                Screen::Menu => self.menu_key(code),
+                _ => self.race_key(code),
+            }
+        }
+    }
+
     fn menu_key(&mut self, code: KeyCode) {
         let idx = MENU.iter().position(|&m| m == self.menu_item).unwrap_or(0);
         match code {
@@ -271,11 +308,16 @@ impl App {
                     return;
                 }
                 self.audio.set_music(race.track.music, 1.0);
-                let k = &self.keys;
+                let (k, pad) = (&self.keys, self.pad.held());
                 let steer = k.held(Btn::Right, now) as i32 as f32 - k.held(Btn::Left, now) as i32 as f32;
-                let brake = k.held(Btn::Down, now);
-                // Without key-release events holding a pedal is unreliable, so throttle is automatic.
-                let accel = if k.enhanced { k.held(Btn::Up, now) } else { !brake };
+                let steer = (steer + pad.steer).clamp(-1.0, 1.0);
+                let brake = k.held(Btn::Down, now) || pad.brake;
+                let accel = pad.accel
+                    || if k.enhanced {
+                        k.held(Btn::Up, now)
+                    } else {
+                        !self.pad.connected() && !brake
+                    };
                 race.update(dt, Controls { steer, accel, brake });
                 for s in race.sfx.drain(..) {
                     self.audio.play(s);

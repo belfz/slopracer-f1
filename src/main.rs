@@ -7,6 +7,7 @@ mod gfx;
 mod input;
 mod kitty;
 mod music;
+mod pad;
 mod race;
 mod render;
 mod settings;
@@ -128,6 +129,7 @@ fn run(enhanced: bool, truecolor: bool, muted: bool, mode: gfx::Mode, pixels_ava
                 _ => {}
             }
         }
+        app.poll_pad();
         app.update(dt, Instant::now());
         let mut image = None;
         terminal.draw(|f| image = ui::draw(f, &app, &mut fb, &mut sprites))?;

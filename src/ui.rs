@@ -128,6 +128,7 @@ fn draw_bios(frame: &mut Frame, app: &App, surf: &Surface, area: Rect, t: f32) {
         truecolor: app.truecolor,
         enhanced: app.keys.enhanced,
         audio: app.audio.available(),
+        pad: app.pad.name(),
     };
     let tone = |t: Tone| match t {
         Tone::Header => Style::default().fg(Color::Rgb(255, 196, 70)).bold(),
@@ -191,7 +192,10 @@ fn draw_menu(frame: &mut Frame, app: &App, fb: &mut FrameBuf, sprites: &mut Vec<
         },
     ))
     .alignment(Alignment::Center);
-    let input = if app.keys.enhanced {
+    let pad = app.pad.name();
+    let input = if let Some(name) = &pad {
+        Span::styled(format!("Input: gamepad · {name}"), Style::default().fg(Color::Green))
+    } else if app.keys.enhanced {
         Span::styled("Input: full key tracking", Style::default().fg(Color::Green))
     } else {
         Span::styled("Input: basic (auto-throttle, hold ↓ to brake)", Style::default().fg(Color::Yellow))
@@ -215,7 +219,11 @@ fn draw_menu(frame: &mut Frame, app: &App, fb: &mut FrameBuf, sprites: &mut Vec<
         Line::default(),
         Line::from(input).alignment(Alignment::Center),
         Line::from(Span::styled(
-            "↑↓ select  ←→ change  Enter start  V graphics  M mute  Q quit",
+            if pad.is_some() {
+                "↑↓ select  ←→ change  ✕ start  V graphics  M mute  Q quit"
+            } else {
+                "↑↓ select  ←→ change  Enter start  V graphics  M mute  Q quit"
+            },
             Style::default().fg(Color::DarkGray),
         ))
         .alignment(Alignment::Center),
@@ -275,7 +283,7 @@ fn draw_race(frame: &mut Frame, app: &App, race: &Race, fb: &mut FrameBuf, sprit
     if race.auto_gear {
         spans.push(Span::styled("  AUTO", label));
     }
-    if !app.keys.enhanced {
+    if app.auto_throttle() {
         spans.push(Span::styled("  AUTO-THROTTLE", Style::default().fg(Color::Yellow)));
     }
     if app.muted {
@@ -311,6 +319,7 @@ fn draw_race(frame: &mut Frame, app: &App, race: &Race, fb: &mut FrameBuf, sprit
     }
     frame.render_widget(FrameView { fb, truecolor: app.truecolor, mode: app.mode }, game);
 
+    let pad = app.pad.connected();
     if finished {
         let row = |k: &str, v: String| Line::from(vec![Span::styled(format!("{k:<16}"), label), Span::styled(v, value)]);
         let lines = vec![
@@ -319,7 +328,11 @@ fn draw_race(frame: &mut Frame, app: &App, race: &Race, fb: &mut FrameBuf, sprit
             row("Race time", fmt_time(race.time)),
             row("Best lap", race.best_lap.map_or("-".into(), fmt_time)),
             Line::default(),
-            Line::from(Span::styled("[Enter] Menu    [R] Race again", Style::default().fg(ACCENT))).alignment(Alignment::Center),
+            Line::from(Span::styled(
+                if pad { "[✕] Menu    [△] Race again" } else { "[Enter] Menu    [R] Race again" },
+                Style::default().fg(ACCENT),
+            ))
+            .alignment(Alignment::Center),
         ];
         let rect = centered(game, 40, lines.len() as u16 + 2, 0.62);
         frame.render_widget(Clear, rect);
@@ -327,13 +340,20 @@ fn draw_race(frame: &mut Frame, app: &App, race: &Race, fb: &mut FrameBuf, sprit
     } else if app.paused {
         let lines = vec![
             Line::default(),
-            Line::from("[Esc] Resume   [R] Restart   [Q] Quit to menu").alignment(Alignment::Center),
+            Line::from(if pad {
+                "[Options] Resume   [△] Restart   [○] Quit to menu"
+            } else {
+                "[Esc] Resume   [R] Restart   [Q] Quit to menu"
+            })
+            .alignment(Alignment::Center),
         ];
         let rect = centered(game, 50, 4, 0.5);
         frame.render_widget(Clear, rect);
         frame.render_widget(Paragraph::new(lines).block(panel("PAUSED")), rect);
     } else if race.lights().is_some() {
-        let hint = if app.keys.enhanced {
+        let hint = if pad {
+            "Hold R2/✕ to rev · stick steers · L2/□ brake · L1/R1 shift gear"
+        } else if app.keys.enhanced {
             "Hold ↑ to rev · ←→ steer · ↓ brake · Space shift gear"
         } else {
             "←→ steer · hold ↓ to brake · Space shift gear"
