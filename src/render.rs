@@ -1,0 +1,719 @@
+//! Pseudo-3D road renderer in the 16-bit tradition: segment projection with
+//! curves and hills, layered parallax backdrop, anti-aliased road edges and
+//! supersampled sprite scaling with hill-crest occlusion.
+
+use crate::gfx::{FrameBuf, Rgb};
+use crate::sprites::Bitmap;
+use crate::track::{Backdrop, Palette, Track, ROAD_HALF};
+use std::f32::consts::TAU;
+
+/// Distance (m) from the camera to the ground at the bottom screen row.
+pub const Z_NEAR: f32 = 4.0;
+/// Distance from the camera to the player's car.
+pub const PLAYER_Z: f32 = 4.6;
+const Z_START: f32 = 0.8;
+const SEG: f32 = 2.0;
+const DRAW_DIST: f32 = 360.0;
+const STRIPE: f32 = 6.0;
+const LANE: f32 = ROAD_HALF / 3.0;
+const HORIZON: f32 = 0.42;
+/// Neon ground grid spacing and line width (m).
+const GRID: f32 = 8.0;
+const GRID_LINE: f32 = 0.35;
+
+pub struct Camera {
+    pub d: f32,
+    pub x: f32,
+    /// Horizontal scroll of the background, in screen widths.
+    pub bg: f32,
+}
+
+pub struct SpriteInst {
+    pub z: f32,
+    pub x: f32,
+    pub width_m: f32,
+    pub bmp: &'static Bitmap,
+    pub body: Rgb,
+    pub flip: bool,
+    /// Horizontal lean of the top rows (car steering), in bitmap pixels.
+    pub skew: i32,
+    /// Vertical offset in metres (bumps).
+    pub lift: f32,
+    pub shadow: bool,
+}
+
+#[derive(Clone, Copy)]
+struct Proj {
+    z: f32,
+    sy: f32,
+    cx: f32,
+    xo: f32,
+    y: f32,
+}
+
+fn hash(n: u32) -> u32 {
+    let mut x = n.wrapping_mul(0x9E37_79B9);
+    x ^= x >> 15;
+    x = x.wrapping_mul(0x85EB_CA6B);
+    x ^ (x >> 13)
+}
+
+fn hashf(n: u32) -> f32 {
+    (hash(n) % 10_000) as f32 / 10_000.0
+}
+
+const BAYER: [f32; 16] = [0., 8., 2., 10., 12., 4., 14., 6., 3., 11., 1., 9., 15., 7., 13., 5.];
+
+#[inline]
+fn bayer(x: usize, y: usize) -> f32 {
+    BAYER[(y & 3) * 4 + (x & 3)] / 16.0 - 0.5
+}
+
+/// Screen geometry shared by background, road and sprites.
+struct View {
+    w: usize,
+    h: usize,
+    hz: f32,
+    focal_y: f32,
+    /// Pixel width / pixel height.
+    aspect: f32,
+}
+
+pub fn render_world(fb: &mut FrameBuf, track: &Track, cam: &Camera, sprites: &mut [SpriteInst], time: f32, aspect: f32) {
+    let (w, h) = (fb.w, fb.h);
+    if w < 8 || h < 8 {
+        return;
+    }
+    let focal_x = 0.4 * w as f32;
+    let v = View { w, h, hz: h as f32 * HORIZON, focal_y: focal_x * aspect, aspect };
+    let pal = &track.palette;
+
+    draw_backdrop(fb, &v, pal, cam.bg, time);
+
+    // --- Project segment boundaries ---------------------------------------
+    let cam_h = (Z_NEAR * (h as f32 - v.hz) / v.focal_y).clamp(1.6, 5.0);
+    let cam_y = track.height_at(cam.d) + cam_h;
+    let n = (DRAW_DIST / SEG) as usize;
+    let mut pts = Vec::with_capacity(n + 1);
+    let (mut dx, mut xo) = (0.0f32, 0.0f32);
+    for i in 0..=n {
+        let z = Z_START + i as f32 * SEG;
+        if i > 0 {
+            let c = track.curve_at(cam.d + z - SEG * 0.5);
+            xo += dx * SEG + 0.5 * c * SEG * SEG;
+            dx += c * SEG;
+        }
+        let y = track.height_at(cam.d + z);
+        pts.push(Proj {
+            z,
+            sy: v.hz + (cam_y - y) * v.focal_y / z,
+            cx: w as f32 / 2.0 + (xo - cam.x) * focal_x / z,
+            xo,
+            y,
+        });
+    }
+    let fog_at = |z: f32| ((z - 30.0) / (DRAW_DIST - 30.0)).clamp(0.0, 1.0).powf(1.2) * 0.92;
+
+    // --- Road, near to far, with a running clip line for hill crests -------
+    let mut clip = h as f32;
+    let mut seg_clip = vec![h as f32; n + 1];
+    for i in 0..n {
+        seg_clip[i] = clip;
+        let (a, b) = (pts[i], pts[i + 1]);
+        if b.sy >= a.sy || b.sy >= clip {
+            continue;
+        }
+        let y0 = (b.sy - 0.5).ceil().max(0.0) as i32;
+        let y1 = (a.sy.min(clip) - 0.5).ceil().min(h as f32) as i32;
+        let iz_at = |yy: f32| {
+            let t = (a.sy - yy) / (a.sy - b.sy);
+            (1.0 / a.z) * (1.0 - t) + (1.0 / b.z) * t
+        };
+        for y in y0..y1 {
+            let yc = y as f32 + 0.5;
+            let t = (a.sy - yc) / (a.sy - b.sy);
+            let iz = iz_at(yc);
+            let z = 1.0 / iz;
+            let cx = a.cx + (b.cx - a.cx) * t;
+            // Depth covered by this pixel row, for filtering grid lines.
+            let span = (1.0 / iz_at(y as f32).max(1e-4) - 1.0 / iz_at(y as f32 + 1.0).max(1e-4)).abs();
+            draw_road_row(fb, y as usize, cx, focal_x * iz, cam.d + z, span, track, fog_at(z));
+        }
+        clip = clip.min(b.sy);
+    }
+    seg_clip[n] = clip;
+
+    // --- Sprites, far to near ----------------------------------------------
+    sprites.sort_by(|a, b| b.z.partial_cmp(&a.z).unwrap());
+    let z_end = Z_START + n as f32 * SEG;
+    for s in sprites.iter() {
+        if s.z < Z_START || s.z >= z_end {
+            continue;
+        }
+        let f = (s.z - Z_START) / SEG;
+        let i = (f as usize).min(n - 1);
+        let t = f - i as f32;
+        let (a, b) = (pts[i], pts[i + 1]);
+        let xo = a.xo + (b.xo - a.xo) * t;
+        let y = a.y + (b.y - a.y) * t + s.lift;
+        let base = v.hz + (cam_y - y) * v.focal_y / s.z;
+        let sx = w as f32 / 2.0 + (xo + s.x - cam.x) * focal_x / s.z;
+        let wpx = s.width_m * focal_x / s.z;
+        let hpx = s.width_m * s.bmp.h as f32 / s.bmp.w as f32 * v.focal_y / s.z;
+        let clip_y = seg_clip[i];
+        if s.shadow {
+            let ry = (wpx * 0.09 * v.aspect).max(1.0);
+            let sy = base - ry * 0.3;
+            if sy < clip_y {
+                fb.ellipse(sx, sy, wpx * 0.56, ry, Rgb(0, 0, 0), 0.38);
+            }
+        }
+        draw_sprite(fb, s, sx, base, wpx, hpx, clip_y, pal.light, pal.fog, fog_at(s.z));
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_road_row(fb: &mut FrameBuf, y: usize, cx: f32, scale: f32, d: f32, span: f32, track: &Track, fog: f32) {
+    let pal = &track.palette;
+    let stripe = ((d / STRIPE).floor() as i64).rem_euclid(2) as usize;
+    let f = |c: Rgb| c.lerp(pal.fog, fog);
+    let grass = f(pal.grass[stripe]);
+    let road = f(pal.road[stripe]);
+    let rumble = f(pal.rumble[stripe]);
+    let lane = f(pal.lane);
+    let (white, black) = (f(Rgb(236, 236, 236)), f(Rgb(22, 22, 22)));
+    let dm = d.rem_euclid(track.length);
+    let start_line = dm < 3.0;
+    // Painted grid slots just behind the line.
+    let grid_mark = (track.length - dm) < 75.0 && (track.length - dm) % 12.0 < 0.5;
+    let dashes = stripe == 0;
+    let mpp = 1.0 / scale;
+    // Neon grid: the share of this row's depth range covered by cross lines.
+    let grid = pal.grid.map(|g| {
+        let covered = |x: f32| {
+            let y = x + GRID_LINE / 2.0;
+            (y / GRID).floor() * GRID_LINE + y.rem_euclid(GRID).min(GRID_LINE)
+        };
+        let span = span.max(0.02);
+        let cross = ((covered(d + span / 2.0) - covered(d - span / 2.0)) / span).clamp(0.0, 1.0);
+        (g.lerp(pal.fog, fog * 0.8), cross, grass)
+    });
+
+    let color_at = |rel: f32| -> Rgb {
+        let a = rel.abs();
+        if a <= ROAD_HALF {
+            if start_line {
+                if (rel.floor() as i64 + dm.floor() as i64).rem_euclid(2) == 0 { white } else { black }
+            } else if a > ROAD_HALF - 0.25 || (dashes && (a - LANE).abs() < 0.12) {
+                lane
+            } else if grid_mark && (1.2..3.2).contains(&a) {
+                white
+            } else {
+                road
+            }
+        } else if a <= ROAD_HALF + 0.9 {
+            rumble
+        } else if let Some((line, cross, ground)) = grid {
+            let along = (rel.rem_euclid(GRID) < GRID_LINE) as u8 as f32;
+            ground.lerp(line, along.max(cross))
+        } else {
+            grass
+        }
+    };
+    let zone = |rel: f32| -> u8 {
+        let a = rel.abs();
+        if a <= ROAD_HALF - 0.25 { 0 } else if a <= ROAD_HALF { 1 } else if a <= ROAD_HALF + 0.9 { 2 } else { 3 }
+    };
+
+    let row = fb.row_mut(y);
+    for (px, out) in row.iter_mut().enumerate() {
+        let rel = (px as f32 + 0.5 - cx) * mpp;
+        let (l, r) = (rel - 0.5 * mpp, rel + 0.5 * mpp);
+        let thin = (rel.abs() - LANE).abs() < mpp + 0.12
+            || start_line
+            || grid_mark
+            || (grid.is_some() && (rel + mpp).rem_euclid(GRID) < GRID_LINE + 2.0 * mpp);
+        *out = if zone(l) != zone(r) || (l < 0.0) != (r < 0.0) || thin {
+            // Supersample edges and thin markings for smooth, stable lines.
+            let (mut rr, mut gg, mut bb) = (0u32, 0u32, 0u32);
+            for k in 0..4 {
+                let c = color_at(l + (k as f32 + 0.5) * 0.25 * mpp);
+                rr += c.0 as u32;
+                gg += c.1 as u32;
+                bb += c.2 as u32;
+            }
+            Rgb((rr / 4) as u8, (gg / 4) as u8, (bb / 4) as u8)
+        } else {
+            color_at(rel)
+        };
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_sprite(fb: &mut FrameBuf, s: &SpriteInst, cx: f32, base: f32, wpx: f32, hpx: f32, clip_y: f32, light: f32, fogc: Rgb, fog: f32) {
+    let bmp = s.bmp;
+    if wpx < 0.5 || hpx < 0.5 {
+        return;
+    }
+    let (x0, y0) = (cx - wpx / 2.0, base - hpx);
+    let ix0 = x0.floor().max(0.0) as i32;
+    let ix1 = (x0 + wpx).ceil().min(fb.w as f32) as i32;
+    let iy0 = y0.floor().max(0.0) as i32;
+    let iy1 = base.min(clip_y).ceil().min(fb.h as f32) as i32;
+    // Supersample when the bitmap is being shrunk.
+    let ns = ((bmp.w as f32 / wpx).max(bmp.h as f32 / hpx).ceil() as usize).clamp(1, 3);
+    let (bw, bh) = (bmp.w as f32, bmp.h as f32);
+    for py in iy0..iy1 {
+        let row_clip = (clip_y - py as f32).clamp(0.0, 1.0);
+        for px in ix0..ix1 {
+            let (mut r, mut g, mut b, mut hits) = (0u32, 0u32, 0u32, 0u32);
+            for sy in 0..ns {
+                let fy = py as f32 + (sy as f32 + 0.5) / ns as f32;
+                let v = ((fy - y0) / hpx * bh).floor() as isize;
+                if v < 0 || v >= bmp.h as isize {
+                    continue;
+                }
+                let skew = if v < 6 { s.skew as isize } else { 0 };
+                for sx in 0..ns {
+                    let fx = px as f32 + (sx as f32 + 0.5) / ns as f32;
+                    let mut u = ((fx - x0) / wpx * bw).floor() as isize - skew;
+                    if u < 0 || u >= bmp.w as isize {
+                        continue;
+                    }
+                    if s.flip {
+                        u = bmp.w as isize - 1 - u;
+                    }
+                    if let Some(c) = bmp.get(u as usize, v as usize).resolve(s.body) {
+                        r += c.0 as u32;
+                        g += c.1 as u32;
+                        b += c.2 as u32;
+                        hits += 1;
+                    }
+                }
+            }
+            if hits > 0 {
+                let c = Rgb((r / hits) as u8, (g / hits) as u8, (b / hits) as u8).scale(light).lerp(fogc, fog);
+                let alpha = hits as f32 / (ns * ns) as f32 * row_clip;
+                fb.blend(px, py, c, alpha);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Backdrop
+// ---------------------------------------------------------------------------
+
+fn ridge(u: f32, seed: f32) -> f32 {
+    let mut h = 0.0;
+    let mut amp = 0.5;
+    let mut freq = 1.0;
+    for k in 0..5 {
+        h += amp * (1.0 - ((u * freq + seed * (k as f32 + 1.3)).sin()).abs());
+        amp *= 0.5;
+        freq *= 2.13;
+    }
+    h / 0.97
+}
+
+fn rolling(u: f32, seed: f32) -> f32 {
+    0.5 + 0.28 * (u + seed).sin() + 0.14 * (u * 2.7 + seed * 3.0).sin() + 0.06 * (u * 7.3 + seed).sin()
+}
+
+fn draw_backdrop(fb: &mut FrameBuf, v: &View, pal: &Palette, bg: f32, time: f32) {
+    let (w, h) = (v.w, v.h);
+    let wf = w as f32;
+    let hz = v.hz;
+    let hzi = hz.ceil() as usize;
+
+    // Sky: three-stop gradient with ordered dithering between bands.
+    for y in 0..hzi.min(h) {
+        let t = y as f32 / hz;
+        for x in 0..w {
+            let tt = (t + bayer(x, y) * 0.03).clamp(0.0, 1.0);
+            let c = if tt < 0.55 { pal.sky[0].lerp(pal.sky[1], tt / 0.55) } else { pal.sky[1].lerp(pal.sky[2], (tt - 0.55) / 0.45) };
+            fb.set(x as i32, y as i32, c);
+        }
+    }
+
+    if pal.stars {
+        let n = (w * hzi / 40) as u32;
+        for i in 0..n {
+            let x = ((hashf(i * 3 + 1) - bg * 0.1) * wf).rem_euclid(wf);
+            let y = hashf(i * 3 + 2) * hz * 0.8;
+            let tw = ((time * (1.5 + hashf(i)) + i as f32).sin() * 0.5 + 0.5) * 0.7 + 0.3;
+            let c = Rgb(255, 255, 230).scale(tw * (0.5 + hashf(i * 7) * 0.5));
+            fb.set(x as i32, y as i32, c);
+        }
+    }
+
+    if pal.backdrop == Backdrop::Synth {
+        draw_synth_backdrop(fb, v, pal, bg, time);
+        return;
+    }
+
+    // Sun / moon with glow rings.
+    if let Some(sun) = pal.sun {
+        let sx = (wf * 0.72 - bg * wf * 0.15).rem_euclid(wf * 1.6) - wf * 0.3;
+        let sy = hz * if pal.stars { 0.28 } else { 0.5 };
+        let r = (h as f32 * 0.06).max(2.0);
+        for (k, a) in [(2.2, 0.12), (1.6, 0.2), (1.25, 0.35)] {
+            fb.ellipse(sx, sy, r * k / v.aspect, r * k, sun, a);
+        }
+        fb.ellipse(sx, sy, r / v.aspect, r, sun, 1.0);
+        if pal.stars {
+            // Moon craters.
+            for (ox, oy, rr) in [(-0.3, -0.2, 0.22), (0.35, 0.25, 0.16), (0.1, -0.45, 0.1)] {
+                fb.ellipse(sx + ox * r / v.aspect, sy + oy * r, rr * r / v.aspect, rr * r, sun.scale(0.82), 1.0);
+            }
+        }
+    }
+
+    // Clouds drifting with time and the road's curves.
+    if let Some(cloud) = pal.clouds {
+        for k in 0..9u32 {
+            let span = 1.6;
+            let cxu = (hashf(k * 5 + 1) * span - bg * 0.25 + time * 0.004 * (1.0 + hashf(k))).rem_euclid(span) - 0.3;
+            let cx = cxu * wf;
+            let cy = hz * (0.12 + hashf(k * 5 + 2) * 0.42);
+            let size = h as f32 * (0.035 + hashf(k * 5 + 3) * 0.04);
+            let puffs = 4 + (hash(k) % 3) as usize;
+            for p in 0..puffs {
+                let px = cx + (p as f32 - puffs as f32 / 2.0) * size * 0.9 / v.aspect;
+                let pr = size * (0.7 + hashf(k * 13 + p as u32) * 0.6);
+                let py = cy - pr * 0.35;
+                fb.ellipse(px, py + pr * 0.25, pr * 1.1 / v.aspect, pr * 0.85, cloud.scale(0.78).lerp(pal.sky[2], 0.3), 1.0);
+                fb.ellipse(px - pr * 0.1 / v.aspect, py, pr / v.aspect, pr * 0.8, cloud, 1.0);
+            }
+        }
+    }
+
+    // Far layer: jagged mountains or a city skyline.
+    match pal.backdrop {
+        Backdrop::Mountains { snow } => {
+            let lit = pal.far_hills.lerp(Rgb(255, 255, 255), 0.18);
+            let shade = pal.far_hills.scale(0.75);
+            for x in 0..w {
+                let u = (x as f32 / wf + bg * 0.35) * TAU;
+                let hgt = ridge(u, 1.7);
+                let top = hz - hz * 0.55 * hgt;
+                let slope = ridge(u + 0.01, 1.7) - hgt;
+                let base_c = if slope > 0.0 { lit } else { shade };
+                for y in top.max(0.0) as usize..hzi.min(h) {
+                    let depth = (y as f32 - top) / (hz - top).max(1.0);
+                    let mut c = base_c.lerp(pal.sky[2], depth * 0.55);
+                    if snow && hgt > 0.62 && (y as f32) < top + hz * 0.05 * (hgt - 0.5) * 4.0 {
+                        c = if slope > 0.0 { Rgb(250, 240, 245) } else { Rgb(200, 180, 210) };
+                    }
+                    fb.set(x as i32, y as i32, c);
+                }
+            }
+        }
+        Backdrop::Synth => unreachable!(),
+        Backdrop::City => {
+            let cols = 34.0;
+            for x in 0..w {
+                let u = x as f32 / wf + bg * 0.45;
+                let bi = (u * cols).floor() as i64;
+                let local = ((u * cols).fract() * wf / cols) as i32;
+                let bh = 0.12 + hashf(bi as u32 * 7 + 3) * 0.32;
+                let top = hz - hz * bh;
+                let tint = pal.far_hills.scale(0.8 + hashf(bi as u32) * 0.4);
+                for y in top.max(0.0) as usize..hzi.min(h) {
+                    let ly = y as i32 - top as i32;
+                    let window = local % 3 == 1 && ly % 3 == 1 && ly > 1;
+                    let lit_w = hash((bi as u32).wrapping_mul(131) ^ ((local / 3) as u32 * 17) ^ (ly as u32 / 3 * 7919)).is_multiple_of(3);
+                    let c = if window && lit_w { Rgb(255, 210, 110) } else { tint };
+                    fb.set(x as i32, y as i32, c);
+                }
+            }
+        }
+    }
+
+    // Near rolling hills with a tree line.
+    let near_lit = pal.near_hills.lerp(Rgb(255, 255, 200), 0.08);
+    for x in 0..w {
+        let u = x as f32 / wf;
+        let base = rolling((u * 1.5 + bg) * TAU, 4.0);
+        let trees = ((u * 38.0 + bg * 25.0) * TAU).sin().abs().sqrt() * 0.03 * (0.5 + base);
+        let top = hz - hz * (0.07 + 0.14 * base + trees);
+        for y in top.max(0.0) as usize..hzi.min(h) {
+            let t = (y as f32 - top) / (hz - top).max(1.0);
+            let c = near_lit.lerp(pal.near_hills.scale(0.6), t + bayer(x, y) * 0.15);
+            fb.set(x as i32, y as i32, c);
+        }
+    }
+
+    // Distant ground below the horizon (seen past crests).
+    let ground = pal.grass[0].lerp(pal.fog, 0.85);
+    for y in hzi.min(h)..h {
+        fb.row_mut(y).fill(ground);
+    }
+}
+
+/// Synthwave sunset: striped retro sun sinking behind neon wireframe
+/// mountains (with a lone volcano) and a Tokyo skyline with pagodas.
+fn draw_synth_backdrop(fb: &mut FrameBuf, v: &View, pal: &Palette, bg: f32, time: f32) {
+    let (w, h) = (v.w, v.h);
+    let (wf, hz) = (w as f32, v.hz);
+    let hzi = (hz.ceil() as usize).min(h);
+    let neon = pal.grid.unwrap_or(Rgb(255, 46, 196));
+
+    // Stars fading out towards the warm horizon.
+    let n = (w * hzi / 110) as u32;
+    for i in 0..n {
+        let x = ((hashf(i * 3 + 1) - bg * 0.1) * wf).rem_euclid(wf);
+        let yt = hashf(i * 3 + 2).powf(1.6) * 0.55;
+        let tw = ((time * (1.5 + hashf(i)) + i as f32).sin() * 0.5 + 0.5) * 0.6 + 0.4;
+        fb.blend(x as i32, (yt * hz) as i32, Rgb(255, 230, 255), tw * (1.0 - yt / 0.55));
+    }
+
+    // Retro sun: yellow-to-magenta gradient, sliced by widening gaps.
+    let sun = pal.sun.unwrap_or(Rgb(255, 214, 90));
+    let r = h as f32 * 0.17;
+    let rx = r / v.aspect;
+    let sx = (wf * 0.5 - bg * wf * 0.15).rem_euclid(wf * 1.6) - wf * 0.3;
+    let sy = hz * 0.6;
+    for (k, a) in [(1.9, 0.08), (1.45, 0.14), (1.15, 0.22)] {
+        fb.ellipse(sx, sy, rx * k, r * k, Rgb(255, 80, 150), a);
+    }
+    for y in (sy - r).max(0.0) as i32..(sy + r).min(hz) as i32 {
+        let dy = (y as f32 + 0.5 - sy) / r;
+        let u = (dy + 1.0) / 2.0;
+        if dy > 0.0 {
+            let band = (dy * 7.0).fract();
+            if band < 0.15 + dy * 0.45 {
+                continue;
+            }
+        }
+        let half = (1.0 - dy * dy).max(0.0).sqrt() * rx;
+        let c = sun.lerp(Rgb(255, 120, 60), (u * 1.6).min(1.0)).lerp(Rgb(255, 40, 150), ((u - 0.5) * 2.0).clamp(0.0, 1.0));
+        for x in (sx - half).floor().max(0.0) as i32..(sx + half).ceil().min(wf) as i32 {
+            let edge = (half - (x as f32 + 0.5 - sx).abs()).clamp(0.0, 1.0);
+            fb.blend(x, y, c, edge);
+        }
+    }
+
+    // Wireframe mountains with a snow-capped volcano.
+    let fill = pal.far_hills;
+    let height_at = |x: f32| -> f32 {
+        let p = x / wf + bg * 0.35;
+        let base = ridge(p * TAU, 3.1) * 0.42;
+        let f = 1.0 - ((p.rem_euclid(1.0) - 0.68).abs() / 0.16);
+        let volcano = if f > 0.0 { 0.78 * f.powf(1.25).min(0.93) } else { 0.0 };
+        base.max(volcano)
+    };
+    let fuji = |x: f32| -> bool {
+        let p = (x / wf + bg * 0.35).rem_euclid(1.0);
+        (p - 0.68).abs() < 0.16 && ridge((x / wf + bg * 0.35) * TAU, 3.1) * 0.42 < 1.0 - ((p - 0.68).abs() / 0.16)
+    };
+    for x in 0..w {
+        let xf = x as f32 + 0.5;
+        let hgt = height_at(xf);
+        let top = hz - hz * 0.62 * hgt;
+        let slope = height_at(xf + 1.0) - hgt;
+        let snowy = fuji(xf);
+        for y in top.max(0.0) as usize..hzi {
+            let yf = y as f32 + 0.5;
+            let below = yf - top;
+            let depth = below / (hz - top).max(1.0);
+            let mut c = fill.lerp(Rgb(90, 20, 90), depth * 0.6);
+            if slope > 0.0 {
+                c = c.lerp(Rgb(150, 50, 120), 0.18 * (1.0 - depth));
+            }
+            // Horizontal contour lines.
+            if ((hz - yf) / hz * 22.0).fract() < 0.1 {
+                c = c.lerp(neon, 0.35 * (1.0 - depth * 0.5));
+            }
+            if snowy && below < hz * 0.62 * 0.2 * (1.0 + 0.3 * (xf * 0.9).sin()) && hgt > 0.5 {
+                c = Rgb(255, 196, 230).lerp(Rgb(200, 120, 190), (slope < 0.0) as u8 as f32 * 0.6);
+            }
+            fb.set(x as i32, y as i32, c);
+        }
+        // Glowing ridge line.
+        let ty = top.floor() as i32;
+        fb.blend(x as i32, ty, neon.lerp(Rgb(255, 255, 255), 0.25), 1.0 - top.fract() * 0.5);
+        fb.blend(x as i32, ty - 1, neon, 0.35);
+    }
+
+    // Tokyo skyline: towers with neon windows, pagodas, a radio mast.
+    let cols = 28.0;
+    let window_cols = [Rgb(255, 80, 200), Rgb(60, 230, 255), Rgb(255, 210, 110)];
+    for x in 0..w {
+        let u = x as f32 / wf + bg * 0.55;
+        let bi = (u * cols).floor() as i64;
+        let fx = (u * cols).fract();
+        let id = bi as u32;
+        let pagoda = hash(id * 31 + 5).is_multiple_of(7);
+        let gap = hash(id * 13 + 1).is_multiple_of(4);
+        let bh = if pagoda { 0.2 } else { 0.05 + hashf(id * 7 + 3) * 0.17 };
+        let mut top = hz - hz * bh;
+        if pagoda {
+            // Five tiers, each roof narrower, with a spire on top.
+            let dc = (fx - 0.5).abs() * 2.0;
+            let tier_h = bh / 5.5;
+            let mut t = None;
+            for k in 0..5 {
+                let reach = 1.0 - k as f32 * 0.16;
+                if dc <= reach {
+                    t = Some(k);
+                }
+            }
+            top = match t {
+                Some(k) if dc < 0.06 => hz - hz * (tier_h * (k as f32 + 1.0) + bh * 0.25),
+                Some(k) => hz - hz * tier_h * (k as f32 + 1.0) + if dc > 1.0 - k as f32 * 0.16 - 0.08 { -1.0 } else { 0.0 },
+                None => hzi as f32,
+            };
+        } else if gap {
+            top = hz - hz * 0.03;
+        } else if hash(id * 3 + 9).is_multiple_of(9) && (fx - 0.5).abs() < 0.04 {
+            top -= hz * 0.08;
+        }
+        let tint = pal.near_hills.scale(0.85 + hashf(id) * 0.4);
+        let px_w = (wf / cols) as i32;
+        let lx = (fx * wf / cols) as i32;
+        for y in top.max(0.0) as usize..hzi {
+            let ly = y as i32 - top as i32;
+            let mut c = tint;
+            if !pagoda && !gap && lx % 3 == 1 && ly % 3 == 1 && ly > 1 && lx < px_w - 1 {
+                let hsh = hash((id).wrapping_mul(131) ^ ((lx / 3) as u32 * 17) ^ (ly as u32 / 3 * 7919));
+                if hsh.is_multiple_of(3) {
+                    c = window_cols[(hsh / 3 % 3) as usize];
+                }
+            }
+            if pagoda && ly == 0 {
+                c = Rgb(255, 120, 150);
+            }
+            fb.set(x as i32, y as i32, c);
+        }
+    }
+
+    // Horizon glow and the grid floor beyond any crests.
+    for y in hzi.saturating_sub(3)..hzi {
+        let a = 1.0 - (hzi - y) as f32 / 4.0;
+        for x in 0..w {
+            fb.blend(x as i32, y as i32, Rgb(255, 120, 200), a * 0.35);
+        }
+    }
+    let ground = pal.grass[0].lerp(pal.fog, 0.7);
+    for y in hzi..h {
+        fb.row_mut(y).fill(ground);
+    }
+}
+
+/// The five red start lights.
+pub fn draw_start_lights(fb: &mut FrameBuf, on: u32, aspect: f32) {
+    let r = (fb.h as f32 / 24.0).max(2.0);
+    let rx = r / aspect;
+    let gap = rx * 2.8;
+    let total = gap * 5.0;
+    let x0 = fb.w as f32 / 2.0 - total / 2.0;
+    let cy = fb.h as f32 * 0.16;
+    fb.fill_rect((x0 - rx * 0.4) as i32, (cy - r * 1.7) as i32, (total + rx * 0.8) as i32, (r * 3.4) as i32, Rgb(15, 15, 18));
+    for i in 0..5 {
+        let lit = (i as u32) < on;
+        let cx = x0 + gap * (i as f32 + 0.5);
+        if lit {
+            fb.ellipse(cx, cy, rx * 1.25, r * 1.25, Rgb(255, 40, 30), 0.35);
+            fb.ellipse(cx, cy, rx, r, Rgb(255, 40, 30), 1.0);
+            fb.ellipse(cx - rx * 0.3, cy - r * 0.3, rx * 0.3, r * 0.3, Rgb(255, 200, 180), 1.0);
+        } else {
+            fb.ellipse(cx, cy, rx, r, Rgb(60, 8, 8), 1.0);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gfx::{draw_text_centered, Mode};
+    use crate::race::Race;
+    use crate::track::all_tracks;
+    use std::rc::Rc;
+
+    fn write_ppm(path: &std::path::Path, w: usize, h: usize, px: impl Fn(usize, usize) -> Rgb) {
+        let mut out = format!("P6\n{w} {h}\n255\n").into_bytes();
+        for y in 0..h {
+            for x in 0..w {
+                let c = px(x, y);
+                out.extend_from_slice(&[c.0, c.1, c.2]);
+            }
+        }
+        std::fs::write(path, out).unwrap();
+    }
+
+    /// Renders frames to `target/snapshots/*.ppm` for eyeballing: native
+    /// pixels, plus a simulation of how the text modes look in a terminal.
+    #[test]
+    fn snapshot_frames() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/snapshots");
+        std::fs::create_dir_all(&dir).unwrap();
+        for (i, track) in all_tracks().into_iter().enumerate() {
+            let mut race = Race::new(Rc::new(track), 3, true, true);
+            for _ in 0..(60 * (9 + i * 7)) {
+                race.update(1.0 / 60.0, Default::default());
+            }
+            let mut sprites = Vec::new();
+            let cam = Camera { d: race.cam_d(), x: race.x, bg: race.bg };
+
+            let mut fb = FrameBuf::new();
+            fb.resize(384, 216);
+            race.sprites(&mut sprites);
+            render_world(&mut fb, &race.track, &cam, &mut sprites, 1.0, 1.0);
+            if i == 0 {
+                draw_start_lights(&mut fb, 3, 1.0);
+            }
+            if i == 1 {
+                draw_text_centered(&mut fb, "PEGASUS F1", 12, (4, 4), Rgb(255, 235, 80), Rgb(255, 90, 20), Some(Rgb(30, 10, 10)));
+            }
+            write_ppm(&dir.join(format!("pixels{i}.ppm")), fb.w, fb.h, |x, y| fb.get(x, y));
+
+            if i == 3 {
+                for (k, d) in [2150.0f32, 400.0, 1150.0].into_iter().enumerate() {
+                    race.d = d;
+                    race.x = 0.0;
+                    let cam = Camera { d: race.cam_d(), x: 0.0, bg: race.bg };
+                    race.sprites(&mut sprites);
+                    render_world(&mut fb, &race.track, &cam, &mut sprites, 1.0, 1.0);
+                    write_ppm(&dir.join(format!("synth{k}.ppm")), fb.w, fb.h, |x, y| fb.get(x, y));
+                }
+            }
+            if i == 1 {
+                for (k, d) in [1235.0f32, 1395.0, 1580.0].into_iter().enumerate() {
+                    race.d = d;
+                    race.x = 0.0;
+                    let cam = Camera { d: race.cam_d(), x: 0.0, bg: race.bg };
+                    race.sprites(&mut sprites);
+                    render_world(&mut fb, &race.track, &cam, &mut sprites, 1.0, 1.0);
+                    write_ppm(&dir.join(format!("hill{k}.ppm")), fb.w, fb.h, |x, y| fb.get(x, y));
+                }
+                fb.resize(384, 216);
+            }
+
+            // Terminal simulation at 140x42 cells of 8x16 px.
+            let (cols, rows, cw, ch) = (140usize, 42usize, 8usize, 16usize);
+            for mode in [Mode::HalfBlock, Mode::Quadrant] {
+                let (w, h, aspect) = match mode {
+                    Mode::HalfBlock => (cols, rows * 2, 1.0),
+                    _ => (cols * 2, rows * 2, 0.5),
+                };
+                fb.resize(w, h);
+                race.sprites(&mut sprites);
+                render_world(&mut fb, &race.track, &cam, &mut sprites, 1.0, aspect);
+                let name = format!("{}{i}.ppm", if mode == Mode::HalfBlock { "half" } else { "quad" });
+                write_ppm(&dir.join(name), cols * cw, rows * ch, |x, y| {
+                    let (c, r) = (x / cw, y / ch);
+                    let (sx, sy) = ((x % cw) * 2 / cw, (y % ch) * 2 / ch);
+                    if mode == Mode::HalfBlock {
+                        return fb.get(c, r * 2 + sy);
+                    }
+                    let q = [fb.get(c * 2, r * 2), fb.get(c * 2 + 1, r * 2), fb.get(c * 2, r * 2 + 1), fb.get(c * 2 + 1, r * 2 + 1)];
+                    let (glyph, fg, bg) = crate::gfx::quadrant_for_test(q);
+                    let bit = sy * 2 + sx;
+                    let idx = crate::gfx::QUADS_FOR_TEST.iter().position(|&g| g == glyph).unwrap();
+                    if (idx >> bit) & 1 == 1 { fg } else { bg }
+                });
+            }
+        }
+    }
+}

@@ -1,0 +1,19 @@
+[package]
+name = "pegasus-f1"
+version = "0.1.0"
+edition = "2021"
+description = "A retro F1 racer for the terminal, inspired by 8-bit console games"
+
+[dependencies]
+ratatui = "0.29"
+cpal = "0.15"
+rand = "0.8"
+flate2 = "1"
+base64 = "0.22"
+
+# Keep the game smooth even with `cargo run`.
+[profile.dev]
+opt-level = 2
+
+[profile.release]
+opt-level = 3
