@@ -6,13 +6,11 @@ A retro pseudo-3D Formula racer for the terminal, inspired by the F1
 cartridges on the Pegasus / Famicom-clone consoles, with graphics a console
 generation later: 16-bit style. Written in Rust with [ratatui](https://ratatui.rs).
 Sound comes from a tiny chiptune-style synth (pulse-wave engine, beeps and noise)
-via [cpal](https://github.com/RustAudio/cpal), plus a synthwave soundtrack
-for the Neon Sakura track.
+via [cpal](https://github.com/RustAudio/cpal), plus an exclusive soundtrack
+for each Japanese track.
 
-![Danube Ring](assets/screenshot-day.png)
-![Carpathian Circuit](assets/screenshot-sunset.png)
-![Baltic Night GP](assets/screenshot-night.png)
 ![Neon Sakura](assets/screenshot-synthwave.png)
+![Shirayuki Pass](assets/screenshot-winter.png)
 
 ## Play
 
@@ -66,10 +64,25 @@ own and you hold `↓` to brake.
 
 ## Tracks
 
-- **Danube Ring**: sunny parkland, fast flowing bends
-- **Carpathian Circuit**: twisty mountain road at sunset
-- **Baltic Night GP**: long straights and hairpins under the lights
 - **Neon Sakura**: synthwave sunset with a striped retro sun, a neon grid
   floor, palm-lined boulevards, katakana neon signs and a tunnel of torii
-  gates. It has its own soundtrack (previewed softly in the menu when the
-  track is selected).
+  gates, to a synthwave soundtrack.
+- **Shirayuki Pass**: a sunny winter afternoon in the Japanese mountains.
+  A snow-capped volcano, a pastel town with a bullet train gliding past,
+  snow-laden cedars and white birches, vending machines, stone lanterns
+  along a shrine approach under snowy torii, and glittering snow, to a
+  breezy city-pop soundtrack.
+
+Each track's soundtrack previews softly in the menu when it is selected.
+
+### Classic tracks
+
+Three original tracks are locked by default: **Danube Ring** (sunny
+parkland), **Carpathian Circuit** (twisty mountain road at sunset) and
+**Baltic Night GP** (night race under the lights). Unlock them under
+*Settings → Classics* in the menu. The choice is saved to
+`~/.config/pegasus-f1/settings` (or `$XDG_CONFIG_HOME/pegasus-f1/settings`).
+
+![Danube Ring](assets/screenshot-day.png)
+![Carpathian Circuit](assets/screenshot-sunset.png)
+![Baltic Night GP](assets/screenshot-night.png)

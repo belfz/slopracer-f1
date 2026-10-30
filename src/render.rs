@@ -233,7 +233,7 @@ fn draw_road_row(fb: &mut FrameBuf, y: usize, cx: f32, scale: f32, d: f32, span:
             || start_line
             || grid_mark
             || (grid.is_some() && (rel + mpp).rem_euclid(GRID) < GRID_LINE + 2.0 * mpp);
-        *out = if zone(l) != zone(r) || (l < 0.0) != (r < 0.0) || thin {
+        let px_out = if zone(l) != zone(r) || (l < 0.0) != (r < 0.0) || thin {
             // Supersample edges and thin markings for smooth, stable lines.
             let (mut rr, mut gg, mut bb) = (0u32, 0u32, 0u32);
             for k in 0..4 {
@@ -246,6 +246,14 @@ fn draw_road_row(fb: &mut FrameBuf, y: usize, cx: f32, scale: f32, d: f32, span:
         } else {
             color_at(rel)
         };
+        *out = px_out;
+        // Sunlit snow glitters: sparse cells catch the light near the car.
+        if pal.snow && mpp < 0.3 && rel.abs() > ROAD_HALF + 1.2 {
+            let cell = ((rel * 6.0).floor() as i32 as u32).wrapping_mul(0x9E37_79B1) ^ ((d * 6.0).floor() as i64 as u32).wrapping_mul(0x85EB_CA77);
+            if hash(cell).is_multiple_of(37) {
+                *out = px_out.lerp(Rgb(255, 255, 255), (1.0 - fog * 2.5).max(0.0));
+            }
+        }
     }
 }
 
@@ -347,9 +355,10 @@ fn draw_backdrop(fb: &mut FrameBuf, v: &View, pal: &Palette, bg: f32, time: f32)
         }
     }
 
-    if pal.backdrop == Backdrop::Synth {
-        draw_synth_backdrop(fb, v, pal, bg, time);
-        return;
+    match pal.backdrop {
+        Backdrop::Synth => return draw_synth_backdrop(fb, v, pal, bg, time),
+        Backdrop::Winter => return draw_winter_backdrop(fb, v, pal, bg, time),
+        _ => {}
     }
 
     // Sun / moon with glow rings.
@@ -409,7 +418,7 @@ fn draw_backdrop(fb: &mut FrameBuf, v: &View, pal: &Palette, bg: f32, time: f32)
                 }
             }
         }
-        Backdrop::Synth => unreachable!(),
+        Backdrop::Synth | Backdrop::Winter => unreachable!(),
         Backdrop::City => {
             let cols = 34.0;
             for x in 0..w {
@@ -601,6 +610,239 @@ fn draw_synth_backdrop(fb: &mut FrameBuf, v: &View, pal: &Palette, bg: f32, time
     }
 }
 
+/// Sunny winter afternoon: a low golden sun, cirrus streaks, a snow-capped
+/// volcano above hazy ranges, frosted forest, a pastel town with a pagoda
+/// and a lattice tower, a bullet train gliding past, and diamond dust.
+fn draw_winter_backdrop(fb: &mut FrameBuf, v: &View, pal: &Palette, bg: f32, time: f32) {
+    let (w, h) = (v.w, v.h);
+    let (wf, hz) = (w as f32, v.hz);
+    let hzi = (hz.ceil() as usize).min(h);
+    let haze = pal.sky[2];
+    let aspect = v.aspect;
+
+    // Low sun with a wide, soft halo and a faint horizontal flare.
+    let sun = pal.sun.unwrap_or(Rgb(255, 238, 196));
+    let sx = (wf * 0.8 - bg * wf * 0.15).rem_euclid(wf * 1.6) - wf * 0.3;
+    let sy = hz * 0.36;
+    let r = (h as f32 * 0.045).max(1.5);
+    for k in (0..14).rev() {
+        let f = 1.3 + k as f32 * 0.55;
+        fb.ellipse(sx, sy, r * f / aspect, r * f, Rgb(255, 222, 170), 0.045);
+    }
+    fb.ellipse(sx, sy, r * 9.0 / aspect, r * 0.22, Rgb(255, 236, 200), 0.2);
+    fb.ellipse(sx, sy, r / aspect, r, sun.lerp(Rgb(255, 255, 255), 0.6), 1.0);
+
+    // Cirrus: long thin streaks, warmed where they pass near the sun.
+    for k in 0..8u32 {
+        let span = 1.7;
+        let cu = (hashf(k * 7 + 1) * span - bg * 0.22 + time * 0.003).rem_euclid(span) - 0.35;
+        let cy = hz * (0.08 + hashf(k * 7 + 2) * 0.38);
+        let len = wf * (0.1 + hashf(k * 7 + 3) * 0.14);
+        let warm = (1.0 - ((cu * wf - sx).abs() / (wf * 0.35))).clamp(0.0, 1.0);
+        let c = Rgb(255, 255, 255).lerp(Rgb(255, 210, 186), warm);
+        let th = (h as f32 * 0.006).max(0.6);
+        for p in 0..5 {
+            let t = p as f32 / 4.0 - 0.5;
+            let px = cu * wf + t * len * 0.8;
+            let py = cy + t * th * 3.0 + (hashf(k * 13 + p) - 0.5) * th * 2.0;
+            fb.ellipse(px, py, len * (0.3 + hashf(k * 17 + p) * 0.2), th * (0.8 + hashf(k * 19 + p)), c, 0.28);
+        }
+    }
+
+    // Hazy far ranges with snowy crests.
+    for x in 0..w {
+        let u = (x as f32 / wf + bg * 0.3) * TAU;
+        let hgt = ridge(u * 1.3, 2.3);
+        let top = hz - hz * 0.3 * hgt;
+        let slope = ridge(u * 1.3 + 0.01, 2.3) - hgt;
+        for y in top.max(0.0) as usize..hzi {
+            let depth = (y as f32 - top) / (hz - top).max(1.0);
+            let snowy = hgt > 0.5 && depth < 0.35;
+            let base = if snowy {
+                if slope < 0.0 { Rgb(250, 244, 240) } else { Rgb(188, 198, 232) }
+            } else {
+                pal.far_hills.scale(if slope < 0.0 { 1.08 } else { 0.92 })
+            };
+            fb.set(x as i32, y as i32, base.lerp(haze, 0.35 + depth * 0.35));
+        }
+    }
+
+    // The volcano: concave flanks, a flat crater rim, snow streaming down
+    // its gullies; the sun-facing side warm, the other in blue shadow.
+    let p0 = 0.3;
+    let vol_h = |x: f32| -> (f32, f32) {
+        let p = (x / wf + bg * 0.3 - p0 + 0.5).rem_euclid(1.0) - 0.5;
+        let q = 1.0 - p.abs() / 0.24;
+        (if q > 0.0 { (0.86 * q.powf(1.7)).min(0.8) } else { 0.0 }, p)
+    };
+    for x in 0..w {
+        let (hgt, p) = vol_h(x as f32 + 0.5);
+        if hgt <= 0.0 {
+            continue;
+        }
+        let top = hz - hz * 0.72 * hgt;
+        let lit = p > 0.0;
+        for y in top.max(0.0) as usize..hzi {
+            let yh = (hz - y as f32 - 0.5) / (hz * 0.72);
+            // Irregular tongues of snow reaching down the ravines.
+            let gully = ((p * 230.0).sin() * 0.6 + (p * 97.0 + 1.0).sin() * 0.4).max(0.0).powi(2);
+            let snowline = 0.5 + 0.03 * (p * 41.0).sin() - 0.17 * gully;
+            let mut c = if yh > snowline {
+                let streak = ((p * 150.0 + yh * 2.0).sin() > 0.8) as u8 as f32 * 0.12;
+                if lit { Rgb(255, 246, 236) } else { Rgb(184, 196, 234) }.lerp(Rgb(150, 164, 210), streak)
+            } else if lit {
+                Rgb(118, 128, 176)
+            } else {
+                Rgb(86, 98, 148)
+            };
+            let fade = 0.12 + 0.55 * (1.0 - yh / 0.8).max(0.0).powi(2);
+            c = c.lerp(haze, fade);
+            fb.set(x as i32, y as i32, c);
+        }
+    }
+
+    // Frosted cedar forest on the near hills.
+    let forest = pal.near_hills;
+    for x in 0..w {
+        let u = x as f32 / wf + bg * 0.45;
+        let base = rolling((u * 1.4) * TAU, 2.0);
+        let teeth = 1.0 - ((u * 110.0).fract() - 0.5).abs() * 2.0;
+        let top = hz - hz * (0.05 + 0.1 * base + 0.03 * teeth);
+        for y in top.max(0.0) as usize..hzi {
+            let t = (y as f32 - top) / (hz - top).max(1.0);
+            let snow = 0.5 - t * 0.6;
+            let c = if bayer(x, y) < snow {
+                Rgb(226, 234, 248).lerp(haze, 0.15)
+            } else {
+                forest.lerp(Rgb(70, 104, 110), 0.3 * (1.0 - t)).lerp(haze, 0.25 * (1.0 - t))
+            };
+            fb.set(x as i32, y as i32, c);
+        }
+    }
+
+    // A small pastel town along the horizon.
+    let walls = [Rgb(240, 230, 214), Rgb(206, 212, 226), Rgb(156, 176, 206), Rgb(214, 140, 112), Rgb(236, 214, 170)];
+    let cols = 46.0;
+    let tower_at = 0.62;
+    for x in 0..w {
+        let u = x as f32 / wf + bg * 0.55;
+        let bi = (u * cols).floor() as i64;
+        let fx = (u * cols).fract();
+        let id = bi as u32;
+        let pu = u.rem_euclid(1.0);
+        // Red-and-white lattice tower.
+        let dt = (pu - tower_at).abs() * cols;
+        if dt < 0.5 {
+            let th = hz * 0.16;
+            let top = hz - th;
+            for y in top.max(0.0) as usize..hzi {
+                let k = (hz - y as f32) / th;
+                if dt < 0.5 * (1.0 - k * 0.85) {
+                    let band = ((k * 9.0) as i32) % 2 == 0;
+                    let c = if band { Rgb(232, 70, 56) } else { Rgb(246, 244, 240) };
+                    fb.set(x as i32, y as i32, c.lerp(haze, 0.2));
+                }
+            }
+            continue;
+        }
+        if hash(id * 13 + 7).is_multiple_of(3) {
+            continue;
+        }
+        let pagoda = hash(id * 29 + 3).is_multiple_of(13);
+        let bh = if pagoda { 0.12 } else { 0.03 + hashf(id * 7 + 1) * 0.06 };
+        let top = hz - hz * bh;
+        let wall = walls[(hash(id) % walls.len() as u32) as usize];
+        let px_w = (wf / cols).max(1.0);
+        let lx = (fx * px_w) as i32;
+        for y in top.max(0.0) as usize..hzi {
+            let ly = y as i32 - top as i32;
+            let c = if pagoda {
+                let tier = (ly as f32 / (hz * bh / 4.0)) as i32;
+                let reach = 0.25 + tier as f32 * 0.07;
+                if (fx - 0.5).abs() > reach {
+                    continue;
+                }
+                let roof = ((ly as f32) % (hz * bh / 4.0)) < 1.0;
+                if roof { Rgb(244, 248, 255) } else { Rgb(92, 56, 50) }
+            } else if ly == 0 {
+                Rgb(250, 252, 255)
+            } else if lx % 3 == 1 && ly % 3 == 2 && lx < px_w as i32 - 1 {
+                if hash(id.wrapping_mul(97) ^ (lx as u32 * 31) ^ (ly as u32 * 7)).is_multiple_of(4) {
+                    Rgb(255, 214, 140)
+                } else {
+                    wall.scale(0.62)
+                }
+            } else {
+                wall
+            };
+            fb.set(x as i32, y as i32, c.lerp(haze, 0.18));
+        }
+    }
+
+    // Elevated railway with a bullet train gliding across.
+    let yv = hz - hz * 0.04;
+    let rail = Rgb(170, 176, 196).lerp(haze, 0.2);
+    for x in 0..w {
+        fb.set(x as i32, yv as i32, rail);
+        if ((x as f32 / wf + bg * 0.6) * 60.0).fract() < 0.06 {
+            for y in yv as usize..hzi {
+                fb.set(x as i32, y as i32, rail.scale(0.85));
+            }
+        }
+    }
+    let len = wf * 0.32;
+    let tx = (time * wf * 0.07 - bg * wf * 0.6).rem_euclid(wf * 2.2) - wf * 0.5;
+    let th = (hz * 0.04).max(2.0);
+    let nose = len * 0.09;
+    for x in tx.max(0.0) as i32..(tx + len).min(wf) as i32 {
+        let along = x as f32 + 0.5 - tx;
+        let cut = ((along - (len - nose)) / nose).max(0.0);
+        let top = yv - th + cut * cut * th * 0.9;
+        for y in top.max(0.0) as i32..yv as i32 {
+            let k = (y as f32 + 0.5 - (yv - th)) / th;
+            let car_gap = (along / (len / 8.0)).fract() < 0.015;
+            let c = if car_gap {
+                Rgb(150, 156, 176)
+            } else if k > 0.62 {
+                Rgb(32, 82, 180)
+            } else if (0.25..0.45).contains(&k) && cut == 0.0 {
+                Rgb(70, 84, 112)
+            } else {
+                Rgb(246, 248, 252)
+            };
+            fb.set(x, y, c);
+        }
+    }
+
+    // Glow of haze along the horizon, then distant snowfields past crests.
+    for y in hzi.saturating_sub(3)..hzi {
+        let a = 1.0 - (hzi - y) as f32 / 4.0;
+        for x in 0..w {
+            fb.blend(x as i32, y as i32, haze, a * 0.3);
+        }
+    }
+    let ground = pal.grass[0].lerp(pal.fog, 0.6);
+    for y in hzi..h {
+        fb.row_mut(y).fill(ground);
+    }
+
+    // Diamond dust: ice crystals twinkling as they drift in the sunlight.
+    let n = (w * hzi / 260) as u32;
+    for i in 0..n {
+        let x = ((hashf(i * 5 + 1) - bg * 0.3 + time * 0.006) * wf).rem_euclid(wf);
+        let y = ((hashf(i * 5 + 2) + time * 0.012 * (0.5 + hashf(i))) * hz).rem_euclid(hz);
+        let tw = ((time * (2.0 + hashf(i * 5 + 3) * 3.0) + i as f32 * 1.7).sin() * 0.5 + 0.5).powi(3);
+        if tw > 0.15 {
+            fb.blend(x as i32, y as i32, Rgb(255, 255, 255), tw);
+            if tw > 0.8 {
+                for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                    fb.blend(x as i32 + dx, y as i32 + dy, Rgb(255, 250, 235), (tw - 0.8) * 2.5);
+                }
+            }
+        }
+    }
+}
+
 /// The five red start lights.
 pub fn draw_start_lights(fb: &mut FrameBuf, on: u32, aspect: f32) {
     let r = (fb.h as f32 / 24.0).max(2.0);
@@ -668,6 +910,24 @@ mod tests {
             }
             write_ppm(&dir.join(format!("pixels{i}.ppm")), fb.w, fb.h, |x, y| fb.get(x, y));
 
+            if i == 4 {
+                for (k, d) in [1450.0f32, 60.0, 700.0, 2500.0].into_iter().enumerate() {
+                    race.d = d;
+                    race.x = 0.0;
+                    let cam = Camera { d: race.cam_d(), x: 0.0, bg: race.bg };
+                    race.sprites(&mut sprites);
+                    render_world(&mut fb, &race.track, &cam, &mut sprites, 3.0 + k as f32 * 4.0, 1.0);
+                    write_ppm(&dir.join(format!("winter{k}.ppm")), fb.w, fb.h, |x, y| fb.get(x, y));
+                }
+                // A big frame with the bullet train in view.
+                fb.resize(960, 540);
+                race.d = 60.0;
+                let cam = Camera { d: race.cam_d(), x: 0.0, bg: race.bg };
+                race.sprites(&mut sprites);
+                render_world(&mut fb, &race.track, &cam, &mut sprites, 10.0 + race.bg * 0.6 / 0.07, 1.0);
+                write_ppm(&dir.join("winter_big.ppm"), fb.w, fb.h, |x, y| fb.get(x, y));
+                fb.resize(384, 216);
+            }
             if i == 3 {
                 for (k, d) in [2150.0f32, 400.0, 1150.0].into_iter().enumerate() {
                     race.d = d;

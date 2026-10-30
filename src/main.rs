@@ -9,6 +9,7 @@ mod kitty;
 mod music;
 mod race;
 mod render;
+mod settings;
 mod sprites;
 mod track;
 mod ui;

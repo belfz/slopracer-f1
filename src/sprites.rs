@@ -779,8 +779,8 @@ fn make_sakura() -> Bitmap {
     b
 }
 
-/// Vermilion torii gate spanning the road.
-fn make_torii() -> Bitmap {
+/// Vermilion torii gate spanning the road, optionally under fresh snow.
+fn make_torii(snow: bool) -> Bitmap {
     let (w, h) = (128, 84);
     let mut b = Bitmap::new(w, h);
     let red = [Rgb(110, 16, 22), Rgb(176, 32, 28), Rgb(228, 64, 36), Rgb(255, 124, 70)];
@@ -834,6 +834,330 @@ fn make_torii() -> Bitmap {
             }
         }
     }
+    if snow {
+        let wi = w as i32;
+        for x in 0..wi {
+            let e = ((x as f32 + 0.5 - 64.0).abs() / 64.0).powi(3);
+            let top = (7.0 - 6.0 * e).floor() as i32;
+            // A pillow of snow along the roof beam, thinning at the tips.
+            let depth = (2.6 * (1.0 - e * 1.6) + noise(x, 0, 41) * 0.8).max(0.0) as i32;
+            for k in 1..=depth {
+                let y = top - k + 1;
+                b.rgb(x, y.max(0), snow_tone(0.95 - k as f32 * 0.12 + (x as f32 / wi as f32) * 0.1, x, y));
+            }
+            if (4..wi - 4).contains(&x) && noise(x, 1, 42) < 0.85 {
+                b.rgb(x, 33, snow_tone(0.85, x, 33));
+            }
+        }
+        // Drifts around the pillar feet.
+        for (pc, half) in [(15.0f32, 9.0f32), (113.0, 9.0)] {
+            for x in 0..wi {
+                let dx = (x as f32 + 0.5 - pc) / half;
+                if dx.abs() < 1.0 {
+                    let rise = ((1.0 - dx * dx) * 4.0) as i32;
+                    for y in h as i32 - 1 - rise..h as i32 {
+                        b.rgb(x, y, snow_tone(0.9 - dx * 0.25, x, y));
+                    }
+                }
+            }
+        }
+    }
+    b
+}
+
+// ---------------------------------------------------------------------------
+// Winter scenery
+// ---------------------------------------------------------------------------
+
+const SNOW: [Rgb; 5] = [Rgb(120, 140, 190), Rgb(168, 186, 226), Rgb(208, 220, 244), Rgb(240, 244, 252), Rgb(255, 255, 255)];
+
+fn snow_tone(l: f32, x: i32, y: i32) -> Rgb {
+    tone(&SNOW, l, x, y)
+}
+
+/// Japanese cedar with snow resting on every tier of branches.
+fn make_snow_cedar() -> Bitmap {
+    let (w, h) = (40, 84);
+    let mut b = Bitmap::new(w, h);
+    trunk(&mut b, 18, 23, 70, h as i32);
+    let pal = [Rgb(8, 28, 28), Rgb(14, 46, 40), Rgb(24, 68, 54), Rgb(44, 96, 74), Rgb(86, 132, 104)];
+    let cx = w as f32 / 2.0;
+    for tier in 0..7 {
+        let top = 2.0 + tier as f32 * 9.6;
+        let bottom = top + 16.0;
+        let half = 4.0 + tier as f32 * 2.3;
+        for y in top as i32..bottom as i32 {
+            let t = (y as f32 - top) / (bottom - top);
+            let hw = half * t + 0.5;
+            for x in 0..w as i32 {
+                let dx = x as f32 + 0.5 - cx;
+                let jag = noise(x, y, 43) * 1.6 * t;
+                if dx.abs() >= hw - jag {
+                    continue;
+                }
+                // Vertical distance below the tier's sloping upper edge.
+                let below = (y as f32 - top) - (dx.abs() - 0.5).max(0.0) / half * (bottom - top);
+                let c = if below < 2.2 + noise(x, y, 44) * 1.8 && t > 0.15 {
+                    snow_tone(0.9 - dx / hw * 0.35 - (below / 4.0) * 0.3, x, y)
+                } else {
+                    tone(&pal, 0.6 - dx / hw * 0.35 - t * 0.35 + noise(x, y, 45) * 0.2, x, y)
+                };
+                b.rgb(x, y, c);
+            }
+        }
+    }
+    b
+}
+
+/// Bare white birch: a pale trunk with dark marks, twigs dusted with snow.
+fn make_birch() -> Bitmap {
+    let (w, h) = (40, 80);
+    let mut b = Bitmap::new(w, h);
+    let mut twigs: Vec<(i32, i32)> = Vec::new();
+    #[allow(clippy::too_many_arguments)]
+    fn grow(b: &mut Bitmap, twigs: &mut Vec<(i32, i32)>, at: (f32, f32), ang: f32, len: f32, r: f32, depth: u32, seed: i32) {
+        let end = (at.0 + ang.cos() * len, at.1 + ang.sin() * len);
+        let c = if depth == 0 { Rgb(150, 128, 120) } else { Rgb(84, 70, 72) };
+        b.stroke(at, end, r, c);
+        let n = (len * 1.5) as i32;
+        for i in 0..=n {
+            let t = i as f32 / n.max(1) as f32;
+            twigs.push(((at.0 + (end.0 - at.0) * t).round() as i32, (at.1 + (end.1 - at.1) * t - r).round() as i32));
+        }
+        if depth > 0 {
+            for (k, spread) in [-0.45f32, 0.4].into_iter().enumerate() {
+                let jitter = (noise(seed, k as i32, 46) - 0.5) * 0.4;
+                grow(b, twigs, end, ang + spread + jitter, len * 0.68, (r * 0.7).max(0.35), depth - 1, seed * 3 + k as i32 + 1);
+            }
+        }
+    }
+    let up = -std::f32::consts::FRAC_PI_2;
+    for (k, &(y, side, len)) in [(46.0, -1.0, 13.0), (38.0, 1.0, 12.0), (30.0, -1.0, 11.0), (22.0, 1.0, 10.0), (15.0, -1.0, 8.0)].iter().enumerate() {
+        let ang = up + side * (0.75 + noise(k as i32, 0, 47) * 0.3);
+        grow(&mut b, &mut twigs, (20.0, y), ang, len, 0.8, 3, k as i32 + 1);
+    }
+    grow(&mut b, &mut twigs, (20.0, 12.0), up, 9.0, 0.8, 2, 9);
+    // Snow along the upper side of the twigs.
+    for (x, y) in twigs {
+        if !b.is_set(x, y) && noise(x, y, 48) < 0.6 {
+            b.rgb(x, y, snow_tone(0.85 + noise(x, y, 49) * 0.15, x, y));
+        }
+    }
+    // Trunk last, tapering, with lenticel marks.
+    for y in 10..h as i32 {
+        let hw = 1.2 + (y as f32 - 10.0) / 70.0 * 1.6;
+        for x in 0..w as i32 {
+            let dx = (x as f32 + 0.5 - 20.0) / hw;
+            if dx.abs() <= 1.0 {
+                let mark = noise(y / 2, (x - 18) / 2, 50) < 0.16 && y % 2 == 0;
+                let c = if mark {
+                    Rgb(40, 36, 40)
+                } else {
+                    [Rgb(250, 248, 240), Rgb(222, 222, 226), Rgb(176, 182, 198)][((dx + 1.0) * 1.49) as usize]
+                };
+                b.rgb(x, y, c);
+            }
+        }
+    }
+    b
+}
+
+/// Stone lantern (toro) with a warm light and a cap of snow.
+fn make_lantern() -> Bitmap {
+    let (w, h) = (20, 36);
+    let mut b = Bitmap::new(w, h);
+    let stone = [Rgb(64, 66, 80), Rgb(104, 106, 118), Rgb(146, 146, 156), Rgb(188, 188, 194)];
+    let slab = |b: &mut Bitmap, x0: i32, x1: i32, y0: i32, y1: i32| {
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let l = 0.85 - (x - x0) as f32 / (x1 - x0) as f32 * 0.6 + noise(x, y, 51) * 0.15;
+                b.rgb(x, y, tone(&stone, l, x, y));
+            }
+        }
+    };
+    slab(&mut b, 3, 17, 32, 36);
+    slab(&mut b, 8, 12, 21, 32);
+    slab(&mut b, 4, 16, 18, 21);
+    slab(&mut b, 5, 15, 11, 18);
+    // Roof: wide at the eaves, with upturned corners.
+    for y in 6..11 {
+        let half = 3 + (y - 6) * 2;
+        slab(&mut b, 10 - half, 10 + half, y, y + 1);
+    }
+    b.rgb(0, 9, stone[1]);
+    b.rgb(19, 9, stone[0]);
+    // Glowing paper window.
+    for y in 12..17 {
+        for x in 7..13 {
+            let c = (x as f32 - 9.5).abs() + (y as f32 - 14.0).abs();
+            b.rgb(x, y, Rgb(255, 244, 200).lerp(Rgb(255, 170, 70), (c / 4.5).min(1.0)));
+        }
+    }
+    // Snow: a mound on the roof, a ball on the finial, dustings on ledges.
+    for x in 1..19 {
+        let dx = (x as f32 - 9.5) / 9.0;
+        let top = 6.0 - (1.0 - dx * dx) * 3.0;
+        for y in top as i32..7 {
+            b.rgb(x, y, snow_tone(0.95 - dx * 0.3, x, y));
+        }
+    }
+    for (x, y) in [(9, 1), (10, 1), (9, 2), (10, 2), (8, 2), (11, 2)] {
+        b.rgb(x, y, snow_tone(if x < 10 { 1.0 } else { 0.75 }, x, y));
+    }
+    for x in 4..16 {
+        b.rgb(x, 18, snow_tone(0.9, x, 18));
+    }
+    for x in 3..17 {
+        b.rgb(x, 32, snow_tone(0.9, x, 32));
+    }
+    b
+}
+
+/// A glowing drinks machine, team-coloured per instance, snow on its roof.
+fn make_vending() -> Bitmap {
+    let (w, h) = (24, 40);
+    let mut b = Bitmap::new(w, h);
+    for y in 4..h as i32 - 1 {
+        for x in 1..23 {
+            let f = if x == 1 { 1.3 } else if x >= 21 { 0.7 } else { 1.0 };
+            b.set(x, y, Px::Body(f));
+        }
+    }
+    for x in 3..21 {
+        for y in 5..9 {
+            b.rgb(x, y, if y == 6 || y == 7 { Rgb(255, 252, 236) } else { Rgb(236, 230, 214) });
+        }
+    }
+    // Lit window with three shelves of cans.
+    let cans = [Rgb(230, 40, 40), Rgb(40, 110, 220), Rgb(250, 200, 40), Rgb(40, 170, 90), Rgb(245, 245, 245), Rgb(250, 130, 30)];
+    for y in 10..25 {
+        for x in 3..21 {
+            b.rgb(x, y, Rgb(200, 214, 226));
+        }
+    }
+    for (row, y0) in [11, 16, 21].into_iter().enumerate() {
+        for k in 0..6 {
+            let x0 = 3 + k * 3;
+            let c = cans[(k as usize + row * 2) % cans.len()];
+            for y in y0..y0 + 3 {
+                b.rgb(x0, y, c);
+                b.rgb(x0 + 1, y, c.scale(0.75));
+            }
+            b.rgb(x0, y0 + 3, Rgb(60, 220, 120));
+        }
+    }
+    for y in 27..33 {
+        for x in 16..20 {
+            b.rgb(x, y, if y == 29 && x == 18 { Rgb(30, 30, 34) } else { Rgb(170, 172, 180) });
+        }
+    }
+    for y in 33..37 {
+        for x in 4..15 {
+            b.rgb(x, y, Rgb(22, 22, 26));
+        }
+    }
+    for x in 1..23 {
+        b.rgb(x, h as i32 - 1, Rgb(30, 30, 34));
+    }
+    for x in 0..24 {
+        let dx = (x as f32 - 11.5) / 12.0;
+        let top = 4.0 - (1.0 - dx * dx) * 3.0 - noise(x, 0, 52) * 0.8;
+        for y in top.max(0.0) as i32..5 {
+            b.rgb(x, y, snow_tone(0.95 - dx * 0.3, x, y));
+        }
+    }
+    b
+}
+
+/// Japanese expressway signs: katakana and their romaji, distance in km.
+pub const ROAD_SIGNS: [(&str, &str); 4] = [("サクラ", "SAKURA 12"), ("ペガサス", "PEGASUS 5"), ("ネオン", "NEON 24"), ("ターボ", "TURBO 31")];
+
+/// Green expressway sign with white lettering and snow along its top.
+fn make_road_sign(kana_text: &str, latin: &str) -> Bitmap {
+    let (w, h) = (66, 48);
+    let mut b = Bitmap::new(w, h);
+    for x in [12, 52] {
+        for y in 32..h as i32 {
+            b.rgb(x, y, Rgb(196, 200, 210));
+            b.rgb(x + 1, y, Rgb(120, 124, 138));
+        }
+    }
+    let white = Rgb(250, 252, 250);
+    for y in 2..33 {
+        for x in 0..w as i32 {
+            let border = x == 2 || x == w as i32 - 3 || y == 4 || y == 30;
+            let c = if border && (2..w as i32 - 2).contains(&x) && (4..31).contains(&y) {
+                white
+            } else {
+                Rgb(18, 122, 78).lerp(Rgb(10, 92, 60), (y - 2) as f32 / 31.0)
+            };
+            b.rgb(x, y, c);
+        }
+    }
+    let glyphs: Vec<[&str; 10]> = kana_text.chars().filter_map(|c| kana(c, false)).collect();
+    let kx = (w as i32 - (glyphs.len() as i32 * 12 - 2)) / 2;
+    for (i, g) in glyphs.iter().enumerate() {
+        for (gy, row) in g.iter().enumerate() {
+            for (gx, ch) in row.bytes().enumerate() {
+                if ch == b'#' {
+                    b.rgb(kx + i as i32 * 12 + gx as i32, 7 + gy as i32, white);
+                }
+            }
+        }
+    }
+    let lw = latin.chars().count() as i32 * 6 - 1;
+    b.text(latin, (w as i32 - lw) / 2, 21, 1, white, Rgb(8, 70, 44));
+    for x in 0..w as i32 {
+        let depth = 1 + (noise(x / 3, 0, 53) * 2.5) as i32;
+        for y in 2 - depth + 1..3 {
+            b.rgb(x, y.max(0), snow_tone(0.95 - x as f32 / w as f32 * 0.2, x, y));
+        }
+    }
+    b
+}
+
+/// A two-ball yukidaruma wearing a red bucket.
+fn make_snowman() -> Bitmap {
+    let (w, h) = (20, 30);
+    let mut b = Bitmap::new(w, h);
+    blobs(&mut b, &[(10.0, 21.0, 8.0), (10.0, 10.0, 5.8)], &SNOW[1..], 54, 0.03);
+    for (x, y) in [(8, 10), (12, 10)] {
+        b.rgb(x, y, Rgb(30, 30, 36));
+    }
+    for (x, y) in [(7, 12), (13, 12)] {
+        b.rgb(x, y, Rgb(250, 160, 170));
+    }
+    b.rgb(10, 13, Rgb(120, 60, 50));
+    for y in 1..6 {
+        let half = 3 + (y - 1) / 2;
+        for x in 10 - half..10 + half {
+            let l = 0.5 + (10 - x) as f32 / 8.0;
+            b.rgb(x + (5 - y) / 3, y, Rgb(200, 34, 40).lerp(Rgb(255, 110, 100), l.clamp(0.0, 1.0) * 0.5));
+        }
+    }
+    b
+}
+
+/// Roadside snow marker: a red-and-white pole with a downward arrow board.
+fn make_snow_pole() -> Bitmap {
+    let (w, h) = (12, 64);
+    let mut b = Bitmap::new(w, h);
+    for y in 12..h as i32 {
+        let red = (y / 5) % 2 == 0;
+        let (lit, dark) = if red { (Rgb(236, 50, 50), Rgb(150, 24, 30)) } else { (Rgb(250, 250, 250), Rgb(190, 196, 210)) };
+        b.rgb(5, y, lit);
+        b.rgb(6, y, dark);
+    }
+    for y in 0..12 {
+        let half = (11 - y) as f32 / 11.0 * 6.0;
+        for x in 0..w as i32 {
+            let dx = (x as f32 + 0.5 - 6.0).abs();
+            if dx <= half {
+                let edge = dx > half - 1.3 || y == 0;
+                b.rgb(x, y, if edge { Rgb(250, 250, 250) } else { Rgb(228, 40, 44) });
+            }
+        }
+    }
     b
 }
 
@@ -857,6 +1181,14 @@ pub struct Sprites {
     pub neon_signs: Vec<Bitmap>,
     pub neon_boards: Vec<Bitmap>,
     pub neon_chevron: Bitmap,
+    pub snow_cedar: Bitmap,
+    pub birch: Bitmap,
+    pub lantern: Bitmap,
+    pub vending: Bitmap,
+    pub snow_torii: Bitmap,
+    pub road_signs: Vec<Bitmap>,
+    pub snowman: Bitmap,
+    pub snow_pole: Bitmap,
 }
 
 pub const BILLBOARD_TEXT: [&str; 5] = ["PEGASUS", "TURBO", "VOLT OIL", "F1", "ZORKA"];
@@ -879,10 +1211,18 @@ pub fn get() -> &'static Sprites {
         grandstand: make_grandstand(),
         palm: make_palm(),
         sakura: make_sakura(),
-        torii: make_torii(),
+        torii: make_torii(false),
         neon_signs: NEON_TEXT.iter().map(|(k, _)| make_neon_sign(k)).collect(),
         neon_boards: NEON_TEXT.iter().map(|(k, l)| make_neon_board(k, l)).collect(),
         neon_chevron: make_neon_chevron(),
+        snow_cedar: make_snow_cedar(),
+        birch: make_birch(),
+        lantern: make_lantern(),
+        vending: make_vending(),
+        snow_torii: make_torii(true),
+        road_signs: ROAD_SIGNS.iter().map(|(k, l)| make_road_sign(k, l)).collect(),
+        snowman: make_snowman(),
+        snow_pole: make_snow_pole(),
     })
 }
 
@@ -904,12 +1244,28 @@ mod tests {
             (&s.neon_chevron, Rgb(40, 230, 255)),
             (&s.torii, Rgb(255, 255, 255)),
         ];
+        write_sheet(&sheet, "sprites.ppm", Rgb(60, 30, 80));
+        let winter: Vec<(&Bitmap, Rgb)> = vec![
+            (&s.snow_cedar, Rgb(255, 255, 255)),
+            (&s.birch, Rgb(255, 255, 255)),
+            (&s.lantern, Rgb(255, 255, 255)),
+            (&s.vending, Rgb(220, 40, 48)),
+            (&s.vending, Rgb(40, 110, 210)),
+            (&s.road_signs[1], Rgb(255, 255, 255)),
+            (&s.snowman, Rgb(255, 255, 255)),
+            (&s.snow_pole, Rgb(255, 255, 255)),
+            (&s.snow_torii, Rgb(255, 255, 255)),
+        ];
+        write_sheet(&winter, "sprites_winter.ppm", Rgb(120, 170, 230));
+    }
+
+    fn write_sheet(sheet: &[(&Bitmap, Rgb)], name: &str, bg: Rgb) {
         let k = 4;
         let w: usize = sheet.iter().map(|(b, _)| b.w * k + 8).sum();
         let h = sheet.iter().map(|(b, _)| b.h * k).max().unwrap();
-        let mut px = vec![Rgb(60, 30, 80); w * h];
+        let mut px = vec![bg; w * h];
         let mut x0 = 0;
-        for (b, body) in sheet {
+        for &(b, body) in sheet {
             for y in 0..b.h * k {
                 for x in 0..b.w * k {
                     if let Some(c) = b.get(x / k, y / k).resolve(body) {
@@ -923,6 +1279,6 @@ mod tests {
         px.iter().for_each(|c| out.extend_from_slice(&[c.0, c.1, c.2]));
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/snapshots");
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("sprites.ppm"), out).unwrap();
+        std::fs::write(dir.join(name), out).unwrap();
     }
 }

@@ -1,15 +1,29 @@
-//! Track soundtracks: a tiny synthwave sequencer with band-limited saw
-//! waves, a four-on-the-floor drum kit, sidechain pumping and a tempo-synced
+//! Track soundtracks: a tiny sequencer with band-limited saw waves, an FM
+//! electric piano, bells, a drum kit, sidechain pumping and a tempo-synced
 //! echo. Runs inside the audio callback, one sample at a time.
+//!
+//! - Neon Sakura: synthwave in A minor, four on the floor.
+//! - Shirayuki: breezy 80s city pop over the "royal road" progression.
 
 use std::f32::consts::TAU;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Tune {
     NeonSakura,
+    Shirayuki,
 }
 
-const BPM: f32 = 104.0;
+impl Tune {
+    fn bpm(self) -> f32 {
+        match self {
+            Tune::NeonSakura => 104.0,
+            Tune::Shirayuki => 108.0,
+        }
+    }
+}
+
+/// Slowest tempo, which sizes the echo buffer.
+const MIN_BPM: f32 = 100.0;
 const STEPS_PER_BAR: usize = 16;
 /// Two intro bars, then a 16-bar loop: 8 bars of arpeggio, 8 with the lead.
 const INTRO_BARS: usize = 2;
@@ -30,6 +44,33 @@ const MELODY: &[(u8, u8, u8, u8)] = &[
     (7, 0, 79, 6), (7, 6, 77, 2), (7, 8, 76, 4), (7, 12, 74, 4),
 ];
 
+/// Shirayuki: Fmaj9 – G13 – Em9 – Am9 – Dm9 – G13 – Cmaj9 – C13, as
+/// (bass root, four-note voicing).
+const CITY_CHORDS: [(u8, [u8; 4]); 8] = [
+    (41, [57, 60, 64, 67]),
+    (43, [53, 59, 64, 69]),
+    (40, [55, 59, 62, 66]),
+    (45, [55, 60, 64, 71]),
+    (38, [53, 57, 60, 64]),
+    (43, [53, 59, 64, 69]),
+    (48, [55, 59, 62, 64]),
+    (48, [52, 58, 62, 69]),
+];
+
+const CITY_MELODY: &[(u8, u8, u8, u8)] = &[
+    (0, 0, 72, 2), (0, 2, 74, 2), (0, 4, 76, 6), (0, 10, 79, 2), (0, 12, 76, 4),
+    (1, 0, 74, 6), (1, 6, 72, 2), (1, 8, 74, 4), (1, 12, 79, 4),
+    (2, 0, 71, 4), (2, 4, 74, 4), (2, 8, 79, 6), (2, 14, 78, 2),
+    (3, 0, 76, 8), (3, 8, 72, 4), (3, 12, 74, 4),
+    (4, 0, 77, 4), (4, 4, 76, 2), (4, 6, 74, 2), (4, 8, 72, 4), (4, 12, 69, 4),
+    (5, 0, 71, 6), (5, 6, 74, 2), (5, 8, 79, 8),
+    (6, 0, 76, 4), (6, 4, 79, 4), (6, 8, 83, 4), (6, 12, 84, 4),
+    (7, 0, 82, 6), (7, 6, 81, 2), (7, 8, 79, 4), (7, 12, 76, 4),
+];
+
+/// Bass line per bar: (step, interval above the root, length in steps).
+const CITY_BASS: [(usize, u8, f32); 6] = [(0, 0, 2.6), (3, 12, 0.8), (6, 0, 1.8), (8, 7, 1.8), (11, 12, 0.8), (14, 7, 1.6)];
+
 fn midi(n: u8) -> f32 {
     440.0 * 2f32.powf((n as f32 - 69.0) / 12.0)
 }
@@ -40,6 +81,8 @@ enum Kind {
     Pad,
     Arp,
     Lead,
+    EPiano,
+    Bell,
     Kick,
     Snare,
     Hat,
@@ -60,6 +103,8 @@ impl Voice {
         match self.kind {
             Kind::Pad => 0.8,
             Kind::Lead => 0.25,
+            Kind::EPiano => 0.3,
+            Kind::Bell => 0.0,
             Kind::Bass | Kind::Arp => 0.06,
             Kind::Kick | Kind::Snare | Kind::Hat => 0.0,
         }
@@ -70,6 +115,7 @@ impl Voice {
             Kind::Kick => self.t > 0.5,
             Kind::Snare => self.t > 0.4,
             Kind::Hat => self.t > 0.12,
+            Kind::Bell => self.t > 1.6,
             _ => self.t > self.gate + self.release(),
         }
     }
@@ -79,6 +125,7 @@ impl Voice {
             Kind::Pad => (0.35, 0.5, 0.8),
             Kind::Lead => (0.02, 0.3, 0.7),
             Kind::Bass => (0.004, 0.15, 0.55),
+            Kind::EPiano => (0.003, 0.7, 0.3),
             _ => (0.003, 0.08, 0.3),
         };
         let held = if self.t < a { self.t / a } else { s + (1.0 - s) * (-(self.t - a) / d).exp() };
@@ -119,6 +166,7 @@ pub struct Music {
     since_kick: f32,
     voices: Vec<Voice>,
     echo: Vec<f32>,
+    echo_len: usize,
     echo_pos: usize,
     rng: u32,
     hat_lp: f32,
@@ -136,6 +184,7 @@ impl Music {
             since_kick: 1.0,
             voices: Vec::new(),
             echo: Vec::new(),
+            echo_len: 1,
             echo_pos: 0,
             rng: 0x1234_5678,
             hat_lp: 0.0,
@@ -146,9 +195,17 @@ impl Music {
 
     pub fn set_rate(&mut self, sr: f32) {
         self.sr = sr;
-        // Dotted-eighth echo.
-        let len = (60.0 / BPM * 0.75 * sr) as usize;
-        self.echo = vec![0.0; len.max(1)];
+        self.echo = vec![0.0; (60.0 / MIN_BPM * 0.75 * sr) as usize + 1];
+        self.sync_echo();
+    }
+
+    fn bpm(&self) -> f32 {
+        self.tune.map_or(120.0, Tune::bpm)
+    }
+
+    /// Dotted-eighth echo at the current tune's tempo.
+    fn sync_echo(&mut self) {
+        self.echo_len = ((60.0 / self.bpm() * 0.75 * self.sr) as usize).clamp(1, self.echo.len());
         self.echo_pos = 0;
     }
 
@@ -168,6 +225,7 @@ impl Music {
         self.clock = 0.0;
         self.voices.clear();
         self.echo.iter_mut().for_each(|x| *x = 0.0);
+        self.sync_echo();
         self.vol_target = if tune.is_some() { vol } else { 0.0 };
     }
 
@@ -179,7 +237,7 @@ impl Music {
     }
 
     fn play(&mut self, kind: Kind, note: u8, steps: f32, vol: f32) {
-        let gate = steps * 60.0 / BPM / 4.0;
+        let gate = steps * 60.0 / self.bpm() / 4.0;
         let freq = if note == 0 { 0.0 } else { midi(note) };
         self.voices.push(Voice { kind, freq, t: 0.0, gate, vol, ph: [0.0, 0.33, 0.66], lp: [0.0; 2] });
     }
@@ -189,6 +247,74 @@ impl Music {
         let st = self.step % STEPS_PER_BAR;
         let intro = bar_abs < INTRO_BARS;
         let bar = if intro { bar_abs } else { (bar_abs - INTRO_BARS) % LOOP_BARS };
+        match self.tune {
+            Some(Tune::Shirayuki) => self.city_step(bar, st, intro),
+            _ => self.synth_step(bar, st, intro),
+        }
+        self.step = (self.step + 1) % ((INTRO_BARS + LOOP_BARS) * STEPS_PER_BAR);
+        if self.step == 0 {
+            self.step = INTRO_BARS * STEPS_PER_BAR;
+        }
+    }
+
+    /// City pop: syncopated electric piano comping, a busy fingered bass,
+    /// glockenspiel sparkles in threes against the beat, and a lead hook.
+    fn city_step(&mut self, bar: usize, st: usize, intro: bool) {
+        let (root, chord) = CITY_CHORDS[bar % 8];
+        let with_lead = !intro && bar >= 8;
+
+        if st == 0 {
+            for n in chord {
+                self.play(Kind::Pad, n, 15.5, 0.022);
+            }
+        }
+        // Push the comping: on the one, the "and" of two, and an anticipation.
+        if let Some(len) = match st {
+            0 => Some(2.5),
+            6 => Some(1.5),
+            10 => Some(3.5),
+            _ => None,
+        } {
+            for (k, n) in chord.into_iter().enumerate() {
+                self.play(Kind::EPiano, n, len, if k == 3 { 0.05 } else { 0.065 });
+            }
+        }
+        if !intro {
+            if st == 0 || st == 7 || st == 10 {
+                self.play(Kind::Kick, 0, 1.0, if st == 0 { 0.7 } else { 0.55 });
+                self.since_kick = 0.0;
+            }
+            if st == 4 || st == 12 {
+                self.play(Kind::Snare, 0, 1.0, 0.22);
+            }
+            let hat = match st % 4 {
+                2 => 0.07,
+                0 => 0.045,
+                _ => 0.022,
+            };
+            self.play(Kind::Hat, 0, 1.0, hat);
+            for &(at, interval, len) in &CITY_BASS {
+                if at == st {
+                    self.play(Kind::Bass, root + interval, len, 0.27);
+                }
+            }
+        }
+        // Bells every third step: a gentle cross-rhythm, high above the chord.
+        if st.is_multiple_of(3) && st < 15 {
+            let pick = (bar * 5 + st / 3) % 4;
+            let vol = if with_lead { 0.028 } else { 0.045 };
+            self.play(Kind::Bell, chord[pick] + 24, 1.0, vol);
+        }
+        if with_lead {
+            let lb = (bar - 8) as u8;
+            let notes: Vec<_> = CITY_MELODY.iter().filter(|m| m.0 == lb && m.1 as usize == st).copied().collect();
+            for (_, _, n, len) in notes {
+                self.play(Kind::Lead, n, len as f32 - 0.3, 0.085);
+            }
+        }
+    }
+
+    fn synth_step(&mut self, bar: usize, st: usize, intro: bool) {
         let (root, triad) = CHORDS[bar % 4];
         let with_lead = !intro && bar >= 8;
 
@@ -226,10 +352,6 @@ impl Music {
                 self.play(Kind::Lead, n, len as f32 - 0.3, 0.11);
             }
         }
-        self.step = (self.step + 1) % ((INTRO_BARS + LOOP_BARS) * STEPS_PER_BAR);
-        if self.step == 0 {
-            self.step = INTRO_BARS * STEPS_PER_BAR;
-        }
     }
 
     pub fn next_sample(&mut self) -> f32 {
@@ -243,7 +365,8 @@ impl Music {
             self.voices.clear();
             return 0.0;
         }
-        let step_len = 60.0 / BPM / 4.0 * self.sr;
+        let step_len = 60.0 / self.bpm() / 4.0 * self.sr;
+        let city = self.tune == Some(Tune::Shirayuki);
         if self.clock <= 0.0 {
             self.trigger_step();
             self.clock += step_len;
@@ -252,7 +375,7 @@ impl Music {
 
         let dt = 1.0 / self.sr;
         self.since_kick += dt;
-        let pump = 1.0 - 0.55 * (-self.since_kick * 9.0).exp();
+        let pump = 1.0 - if city { 0.2 } else { 0.55 } * (-self.since_kick * 9.0).exp();
         let (mut dry, mut send) = (0.0f32, 0.0f32);
         let mut noise_needed = 0;
         for v in &self.voices {
@@ -312,6 +435,26 @@ impl Music {
                     send += o;
                     o
                 }
+                Kind::EPiano => {
+                    // Two-operator FM: a bright bell-like strike mellowing out.
+                    v.ph[0] = (v.ph[0] + v.freq * dt).fract();
+                    v.ph[1] = (v.ph[1] + v.freq * dt).fract();
+                    let index = 1.6 * (-v.t * 7.0).exp() + 0.35;
+                    let m = (v.ph[1] * TAU).sin() * index;
+                    let trem = 1.0 + 0.12 * (v.t * TAU * 4.2).sin();
+                    let o = (v.ph[0] * TAU + m).sin() * env * v.vol * trem * pump;
+                    send += o * 0.25;
+                    o
+                }
+                Kind::Bell => {
+                    v.ph[0] = (v.ph[0] + v.freq * dt).fract();
+                    v.ph[1] = (v.ph[1] + v.freq * 2.76 * dt).fract();
+                    let strike = (v.t * 600.0).min(1.0);
+                    let tone = (v.ph[0] * TAU).sin() + 0.3 * (v.ph[1] * TAU).sin() * (-v.t * 9.0).exp();
+                    let o = tone * (-v.t * 3.2).exp() * strike * v.vol;
+                    send += o;
+                    o
+                }
                 Kind::Kick => {
                     let f = 48.0 + 130.0 * (-v.t * 32.0).exp();
                     v.ph[0] = (v.ph[0] + f * dt).fract();
@@ -344,7 +487,7 @@ impl Music {
 
         let echoed = self.echo[self.echo_pos];
         self.echo[self.echo_pos] = send + echoed * 0.38;
-        self.echo_pos = (self.echo_pos + 1) % self.echo.len();
+        self.echo_pos = (self.echo_pos + 1) % self.echo_len;
         let mix = dry + echoed * 0.45;
         (mix * 1.1).tanh() * self.vol
     }
@@ -357,10 +500,15 @@ mod tests {
     /// Renders the loop offline: it must be audible, never clip, and stay
     /// cheap enough for the audio thread. Also writes a WAV for listening.
     #[test]
-    fn neon_sakura_renders_cleanly() {
+    fn tunes_render_cleanly() {
+        render_tune(Tune::NeonSakura, "neon_sakura.wav");
+        render_tune(Tune::Shirayuki, "shirayuki.wav");
+    }
+
+    fn render_tune(tune: Tune, file: &str) {
         let sr = 44_100.0;
         let mut m = Music::new(sr);
-        m.set(Some(Tune::NeonSakura), 1.0);
+        m.set(Some(tune), 1.0);
         let secs = 50.0;
         let n = (sr * secs) as usize;
         let t = std::time::Instant::now();
@@ -369,7 +517,7 @@ mod tests {
         let peak = samples.iter().fold(0.0f32, |a, &s| a.max(s.abs()));
         let tail = &samples[n / 2..];
         let rms = (tail.iter().map(|s| s * s).sum::<f32>() / tail.len() as f32).sqrt();
-        println!("peak {peak:.3} rms {rms:.3} cpu {:.2}% voices {}", cpu * 100.0, m.voices.len());
+        println!("{tune:?}: peak {peak:.3} rms {rms:.3} cpu {:.2}% voices {}", cpu * 100.0, m.voices.len());
         assert!(samples.iter().all(|s| s.is_finite()));
         assert!(peak <= 1.0);
         assert!(rms > 0.05, "too quiet");
@@ -394,7 +542,7 @@ mod tests {
         for s in samples {
             wav.extend_from_slice(&((s * 32767.0) as i16).to_le_bytes());
         }
-        std::fs::write(dir.join("neon_sakura.wav"), wav).unwrap();
+        std::fs::write(dir.join(file), wav).unwrap();
     }
 
     #[test]
