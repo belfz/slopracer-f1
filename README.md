@@ -2,6 +2,8 @@
 
 # Slopracer F1
 
+**[Play Slopracer F1 in your browser](https://slopracer-f1.pages.dev/)** — no download required.
+
 A retro pseudo-3D Formula racer for the terminal (and the browser), inspired by the F1
 cartridges on 8-bit Famicom-clone consoles, with PS1-inspired 3D cars
 and detailed software-rendered scenery. Written in Rust with [ratatui](https://ratatui.rs).
