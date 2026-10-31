@@ -23,12 +23,21 @@ pub enum MenuItem {
     Track,
     Gearbox,
     Laps,
+    #[cfg(not(target_arch = "wasm32"))]
     Graphics,
     Classics,
     Start,
 }
 
-const MENU: [MenuItem; 6] = [MenuItem::Track, MenuItem::Gearbox, MenuItem::Laps, MenuItem::Graphics, MenuItem::Classics, MenuItem::Start];
+const MENU: &[MenuItem] = &[
+    MenuItem::Track,
+    MenuItem::Gearbox,
+    MenuItem::Laps,
+    #[cfg(not(target_arch = "wasm32"))]
+    MenuItem::Graphics,
+    MenuItem::Classics,
+    MenuItem::Start,
+];
 
 pub struct App {
     pub tracks: Vec<Rc<Track>>,
@@ -87,6 +96,7 @@ impl App {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn cycle_mode(&mut self, dir: i32) {
         let modes: &[Mode] = if self.pixels_available {
             &[Mode::Pixels, Mode::Quadrant, Mode::HalfBlock]
@@ -158,6 +168,7 @@ impl App {
             }
             return;
         }
+        #[cfg(not(target_arch = "wasm32"))]
         if let Key::Char('v' | 'V') = k.key {
             if k.kind == KeyKind::Press {
                 self.cycle_mode(1);
@@ -243,6 +254,7 @@ impl App {
                     }
                     MenuItem::Gearbox => self.auto_gear = !self.auto_gear,
                     MenuItem::Laps => self.laps = (self.laps as i32 + dir).clamp(1, 9) as u32,
+                    #[cfg(not(target_arch = "wasm32"))]
                     MenuItem::Graphics => self.cycle_mode(dir),
                     MenuItem::Classics => self.toggle_classics(),
                     MenuItem::Start => return,

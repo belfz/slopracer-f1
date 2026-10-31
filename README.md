@@ -40,8 +40,9 @@ python3 -m http.server -d web 8000   # then open http://localhost:8000
 
 `web/` is a self-contained static site (`index.html` + `pkg/`), ready for
 GitHub Pages or any static host. The browser version draws the same ratatui UI
-onto a canvas with the game at full pixel resolution underneath, and it
-supports all three graphics modes. Browsers report key releases, so you
+onto a canvas with the game at full pixel resolution underneath. The browser
+always uses the highest-quality Pixels mode, without a graphics selector or
+graphics shortcut. Browsers report key releases, so you
 always hold `↑` to accelerate. Sound, gamepads, and saved settings
 (in localStorage) all work. Click or press a key to power it on: browsers only
 allow audio after a user gesture.
@@ -59,9 +60,9 @@ The deployment uses your Cloudflare login. Generated WebAssembly files and
 local credentials are excluded from Git. The native terminal game remains
 available through `cargo run --release`.
 
-## Graphics modes
+## Terminal graphics modes
 
-Switch between modes at any time with `V` (or in the menu):
+In the terminal, switch between modes at any time with `V` (or in the menu):
 
 | Mode | Resolution | Works in |
 | --- | --- | --- |
@@ -77,7 +78,7 @@ directional lighting, rounded tyres, alloy hubs, suspension, mirrors and team li
 Sponsor boards also have 3D frames and supports. The road has asphalt grain,
 rubber wear, bevelled kerbs and textured verges. Soft clouds, sun halos and
 distance haze preserve each track's atmosphere without forced pixelation or colour reduction.
-Half-block and quadrant modes remain available. Tracks, controls, physics and race rules are unchanged.
+Half-block and quadrant modes remain available in the terminal only. Tracks, controls, physics and race rules are unchanged.
 
 | Key | Action |
 | --- | --- |
@@ -87,7 +88,7 @@ Half-block and quadrant modes remain available. Tracks, controls, physics and ra
 | `Space` / `G` | Shift gear LO ⇄ HI (manual gearbox) |
 | `P` / `Esc` | Pause |
 | `M` | Mute |
-| `V` | Cycle graphics mode |
+| `V` | Cycle graphics mode (terminal only) |
 | `Q` | Quit (from menu / pause) |
 
 Start from the back of a 12-car grid, wait for the five red lights to go

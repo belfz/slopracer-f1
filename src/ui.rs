@@ -212,6 +212,7 @@ fn draw_menu(frame: &mut Frame, app: &App, fb: &mut FrameBuf, sprites: &mut Vec<
         item(MenuItem::Gearbox, "Gearbox", if app.auto_gear { "Auto".into() } else { "Manual (Space)".into() }),
         item(MenuItem::Laps, "Laps", app.laps.to_string()),
         Line::from(Span::styled("  ── Settings ──", Style::default().fg(Color::DarkGray))),
+        #[cfg(not(target_arch = "wasm32"))]
         item(MenuItem::Graphics, "Graphics", app.mode.label().to_string()),
         item(MenuItem::Classics, "Classics", classics),
         Line::default(),
@@ -220,8 +221,9 @@ fn draw_menu(frame: &mut Frame, app: &App, fb: &mut FrameBuf, sprites: &mut Vec<
         Line::from(input).alignment(Alignment::Center),
         Line::from(Span::styled(
             format!(
-                "↑↓ select  ←→ change  {} start  V graphics  M mute{}",
+                "↑↓ select  ←→ change  {} start{}  M mute{}",
                 if pad.is_some() { "✕" } else { "Enter" },
+                if cfg!(target_arch = "wasm32") { "" } else { "  V graphics" },
                 // A browser tab is closed, not quit.
                 if cfg!(target_arch = "wasm32") { "" } else { "  Q quit" },
             ),
