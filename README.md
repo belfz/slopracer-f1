@@ -92,8 +92,10 @@ Half-block and quadrant modes remain available in the terminal only. Tracks, con
 | `Q` | Quit (from menu / pause) |
 
 Start from the back of a 12-car grid, wait for the five red lights to go
-out, and fight your way to the front over 3 laps. Watch for crests: climbing
-costs speed, and you can't see what's behind the top of a hill. Shift up to HI at around
+out, and fight your way to the front over 3 laps. The gearbox defaults to
+automatic in the browser and in every terminal graphics mode. You can select
+manual in the race setup menu. Watch for crests: climbing
+costs speed, and you can't see what's behind the top of a hill. In manual mode, shift up to HI at around
 100 km/h: LO gear tops out near 200 km/h. Bends throw you outward, so ease
 off in the tight ones. Going off the road slows you down, and hitting a tree,
 a sign or another car sends you spinning.

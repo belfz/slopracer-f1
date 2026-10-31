@@ -76,7 +76,7 @@ impl App {
             screen: if intro { Screen::Boot } else { Screen::Menu },
             menu_item: MenuItem::Start,
             track_idx,
-            auto_gear: false,
+            auto_gear: true,
             laps: 3,
             demo,
             race: None,
@@ -347,5 +347,26 @@ impl App {
                 self.audio.set_engine(race.rev, race.throttle, engine_on);
             }
         }
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn automatic_gearbox_is_the_default_in_every_graphics_mode() {
+        let mut app = App::new(true, true, true, Mode::Pixels, true, false);
+        for mode in [Mode::Pixels, Mode::Quadrant, Mode::HalfBlock] {
+            assert_eq!(app.mode, mode);
+            assert!(app.auto_gear);
+            app.start_race();
+            assert!(app.race.as_ref().unwrap().auto_gear);
+            app.cycle_mode(1);
+        }
+        app.menu_item = MenuItem::Gearbox;
+        app.menu_key(Key::Right);
+        app.start_race();
+        assert!(!app.race.as_ref().unwrap().auto_gear);
     }
 }
