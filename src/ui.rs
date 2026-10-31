@@ -68,7 +68,7 @@ fn surface(app: &App, area: Rect) -> Surface {
         Mode::Quadrant => Surface { w: cols * 2, h: rows * 2, aspect: cw / ch, scale: 1 },
         Mode::Pixels => {
             let (pw, ph) = (cols as f32 * cw, rows as f32 * ch);
-            let ih = ph.clamp(16.0, 224.0);
+            let ih = ph.clamp(16.0, 448.0);
             let iw = (ih * pw / ph).round().max(16.0);
             let scale = ((ph / ih).floor() as usize).clamp(1, 2);
             Surface { w: iw as usize, h: ih as usize, aspect: 1.0, scale }
@@ -166,10 +166,10 @@ fn draw_menu(frame: &mut Frame, app: &App, fb: &mut FrameBuf, sprites: &mut Vec<
     let surf = surface(app, area);
     draw_scene(fb, &app.demo, sprites, &surf, app.clock);
     let mut scale = text_scale(fb, surf.aspect, 24.0);
-    while scale.0 > 1 && crate::gfx::text_width("PEGASUS F1", scale.0) > fb.w as i32 * 9 / 10 {
+    while scale.0 > 1 && crate::gfx::text_width("Slopracer F1", scale.0) > fb.w as i32 * 9 / 10 {
         scale = (scale.0 - 1, (scale.1 - 1).max(1));
     }
-    draw_text_centered(fb, "PEGASUS F1", scale.1 * 2, scale, Rgb(255, 235, 80), Rgb(255, 90, 20), Some(Rgb(30, 10, 10)));
+    draw_text_centered(fb, "Slopracer F1", scale.1 * 2, scale, Rgb(255, 235, 80), Rgb(255, 90, 20), Some(Rgb(30, 10, 10)));
     frame.render_widget(FrameView { fb, truecolor: app.truecolor, mode: app.mode }, area);
 
     let track = &app.tracks[app.track_idx];
@@ -219,11 +219,12 @@ fn draw_menu(frame: &mut Frame, app: &App, fb: &mut FrameBuf, sprites: &mut Vec<
         Line::default(),
         Line::from(input).alignment(Alignment::Center),
         Line::from(Span::styled(
-            if pad.is_some() {
-                "↑↓ select  ←→ change  ✕ start  V graphics  M mute  Q quit"
-            } else {
-                "↑↓ select  ←→ change  Enter start  V graphics  M mute  Q quit"
-            },
+            format!(
+                "↑↓ select  ←→ change  {} start  V graphics  M mute{}",
+                if pad.is_some() { "✕" } else { "Enter" },
+                // A browser tab is closed, not quit.
+                if cfg!(target_arch = "wasm32") { "" } else { "  Q quit" },
+            ),
             Style::default().fg(Color::DarkGray),
         ))
         .alignment(Alignment::Center),
@@ -289,7 +290,7 @@ fn draw_race(frame: &mut Frame, app: &App, race: &Race, fb: &mut FrameBuf, sprit
     if app.muted {
         spans.push(Span::styled("  MUTED", label));
     }
-    let title = format!("PEGASUS F1 · {}", race.track.name);
+    let title = format!("Slopracer F1 · {}", race.track.name);
     frame.render_widget(Paragraph::new(Line::from(spans)).block(panel(&title)), hud);
 
     // --- World -----------------------------------------------------------

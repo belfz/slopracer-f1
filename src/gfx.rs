@@ -121,6 +121,7 @@ pub enum Mode {
 impl Mode {
     pub fn label(self) -> &'static str {
         match self {
+            Mode::Pixels if cfg!(target_arch = "wasm32") => "Pixels",
             Mode::Pixels => "Pixels (kitty graphics)",
             Mode::Quadrant => "Quadrant blocks",
             Mode::HalfBlock => "Half blocks",
@@ -128,7 +129,9 @@ impl Mode {
     }
 }
 
-const QUADS: [char; 16] = [
+/// Quadrant glyphs indexed by a mask of filled quarters: bit 0 top-left,
+/// 1 top-right, 2 bottom-left, 3 bottom-right.
+pub const QUADS: [char; 16] = [
     ' ', '▘', '▝', '▀', '▖', '▌', '▞', '▛', '▗', '▚', '▐', '▜', '▄', '▙', '▟', '█',
 ];
 

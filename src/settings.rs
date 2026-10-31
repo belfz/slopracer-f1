@@ -1,7 +1,6 @@
 //! Persistent player settings, stored as `key=value` lines in
-//! `$XDG_CONFIG_HOME/pegasus-f1/settings` (or `~/.config/...`).
-
-use std::path::PathBuf;
+//! `$XDG_CONFIG_HOME/slopracer-f1/settings` (or `~/.config/...`), or in the
+//! browser's localStorage.
 
 #[derive(Clone, Copy, Default, PartialEq, Debug)]
 pub struct Settings {
@@ -9,11 +8,48 @@ pub struct Settings {
     pub classic_tracks: bool,
 }
 
-fn path() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-    Some(base.join("pegasus-f1").join("settings"))
+#[cfg(not(target_arch = "wasm32"))]
+mod store {
+    use std::path::PathBuf;
+
+    fn path() -> Option<PathBuf> {
+        let base = std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
+        Some(base.join("slopracer-f1").join("settings"))
+    }
+
+    pub fn read() -> Option<String> {
+        std::fs::read_to_string(path()?).ok()
+    }
+
+    pub fn write(text: &str) {
+        if let Some(p) = path() {
+            if let Some(dir) = p.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let _ = std::fs::write(p, text);
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+mod store {
+    const KEY: &str = "slopracer-f1.settings";
+
+    fn storage() -> Option<web_sys::Storage> {
+        web_sys::window()?.local_storage().ok()?
+    }
+
+    pub fn read() -> Option<String> {
+        storage()?.get_item(KEY).ok()?
+    }
+
+    pub fn write(text: &str) {
+        if let Some(s) = storage() {
+            let _ = s.set_item(KEY, text);
+        }
+    }
 }
 
 impl Settings {
@@ -34,17 +70,12 @@ impl Settings {
     }
 
     pub fn load() -> Settings {
-        path().and_then(|p| std::fs::read_to_string(p).ok()).map(|t| Settings::parse(&t)).unwrap_or_default()
+        store::read().map(|t| Settings::parse(&t)).unwrap_or_default()
     }
 
     /// Best effort: a read-only home just means settings don't stick.
     pub fn save(&self) {
-        if let Some(p) = path() {
-            if let Some(dir) = p.parent() {
-                let _ = std::fs::create_dir_all(dir);
-            }
-            let _ = std::fs::write(p, self.serialize());
-        }
+        store::write(&self.serialize());
     }
 }
 

@@ -105,8 +105,8 @@ fn script_text(key: &str, info: &BiosInfo, t: f32) -> ScriptLine {
     let l = |s: &str| (s.to_string(), Tone::Label);
     let v = |s: String| (s, Tone::Dim);
     match key {
-        "header" => (vec![("PEGASUS-16 CRYSTAL BIOS v2.86".into(), Tone::Header)], None),
-        "copyright" => (vec![v("Copyright (C) 1993 Pegasus Systems Ltd. All rights reserved.".into())], None),
+        "header" => (vec![("SLOPRACER-16 CRYSTAL BIOS v2.86".into(), Tone::Header)], None),
+        "copyright" => (vec![v("Copyright (C) 1993 Slopracer Systems Ltd. All rights reserved.".into())], None),
         "cpu" => (vec![l("CPU    "), v("FIREFLY 65C816X @ 21.477 MHz, 2 cores of pure enthusiasm".into())], None),
         "clock" => (vec![l("CLOCK  "), v("Crystal oscillator 21.477272 MHz".into())], Some(("LOCKED", Tone::Ok))),
         "memory" => {
@@ -127,13 +127,14 @@ fn script_text(key: &str, info: &BiosInfo, t: f32) -> ScriptLine {
             let (text, status) = if let Some(name) = &info.pad {
                 (format!("gamepad: {name}, analog steering"), ("OK", Tone::Ok))
             } else if info.enhanced {
-                ("kitty keyboard protocol, key release tracking".into(), ("OK", Tone::Ok))
+                let kbd = if cfg!(target_arch = "wasm32") { "browser keyboard" } else { "kitty keyboard protocol" };
+                (format!("{kbd}, key release tracking"), ("OK", Tone::Ok))
             } else {
                 ("legacy keyboard: auto-throttle engaged".into(), ("LIMITED", Tone::Warn))
             };
             (vec![l("INPUT  "), v(text)], Some(status))
         }
-        "cart" => (vec![l("SLOT A "), v("\"PEGASUS F1\" 4 Mbit ROM · checksum 7F3A".into())], None),
+        "cart" => (vec![l("SLOT A "), v("\"Slopracer F1\" 4 Mbit ROM · checksum 7F3A".into())], None),
         "boot" => {
             let dots = ".".repeat(((t * 4.0) as usize) % 4);
             (vec![("Booting cartridge".into(), Tone::Header), (dots, Tone::Header)], None)

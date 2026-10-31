@@ -1,16 +1,44 @@
 [package]
-name = "pegasus-f1"
+name = "slopracer-f1"
 version = "0.1.0"
 edition = "2021"
-description = "A retro F1 racer for the terminal, inspired by 8-bit console games"
+description = "A retro F1 racer for the terminal and the browser, inspired by 8-bit console games"
+
+# The library is the whole game; `main.rs` is the terminal binary and the
+# cdylib is the WebAssembly build (see `web/`).
+[lib]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-ratatui = "0.29"
-cpal = "0.15"
+ratatui = { version = "0.29", default-features = false }
 rand = "0.8"
+gilrs = "0.11"
+web-time = "1"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+ratatui = { version = "0.29", features = ["crossterm", "underline-color"] }
+cpal = "0.15"
 flate2 = "1"
 base64 = "0.22"
-gilrs = "0.11"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+cpal = { version = "0.15", features = ["wasm-bindgen"] }
+getrandom = { version = "0.2", features = ["js"] }
+wasm-bindgen = "0.2"
+console_error_panic_hook = "0.1"
+web-sys = { version = "0.3", features = [
+    "CanvasRenderingContext2d",
+    "console",
+    "CssStyleDeclaration",
+    "Document",
+    "Event",
+    "HtmlCanvasElement",
+    "ImageData",
+    "KeyboardEvent",
+    "Storage",
+    "TextMetrics",
+    "Window",
+] }
 
 # Keep the game smooth even with `cargo run`.
 [profile.dev]

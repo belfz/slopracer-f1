@@ -1,6 +1,5 @@
-//! Sprite bitmaps. Cars are hand-drawn pixel art (recoloured per team via
-//! "body" pixels); scenery is generated procedurally at start-up with
-//! 16-bit style dithered shading.
+//! Procedural scenery bitmaps and team-coloured car fallbacks for distant
+//! traffic. Nearby cars and sponsor boards use the scene's mesh renderer.
 
 use crate::gfx::{glyph, Rgb};
 use std::sync::OnceLock;
@@ -459,7 +458,8 @@ fn make_gantry() -> Bitmap {
             b.rgb(x, y, c);
         }
     }
-    b.text("PEGASUS GP", (w as i32 - 59) / 2, 5, 1, Rgb(255, 214, 40), Rgb(0, 0, 20));
+    let label = "SLOPRACER GP";
+    b.text(label, (w as i32 - crate::gfx::text_width(label, 1)) / 2, 5, 1, Rgb(255, 214, 40), Rgb(0, 0, 20));
     b
 }
 
@@ -515,13 +515,21 @@ fn make_grandstand() -> Bitmap {
 /// mark used in top-to-bottom writing.
 fn kana(ch: char, vertical: bool) -> Option<[&'static str; 10]> {
     Some(match ch {
-        'ペ' => [
-            ".......##.", "......#..#", ".......##.", "...#......", "..#.#.....",
-            ".#...#....", "#.....#...", ".......#..", "........#.", ".........#",
+        'ロ' => [
+            "#########.", "#.......#.", "#.......#.", "#.......#.", "#.......#.",
+            "#.......#.", "#.......#.", "#.......#.", "#########.", "..........",
         ],
-        'ガ' => [
-            "...#..#.#.", "...#...#.#", "########..", "...#....#.", "...#....#.",
-            "..#.....#.", "..#.....#.", ".#......#.", "#.......#.", "......##..",
+        'ッ' => [
+            "..........", "..........", "..........", "..........", "..#..#..#.",
+            "...#..#.#.", "........#.", ".......#..", "......#...", "....##....",
+        ],
+        'プ' => [
+            ".......##.", "......#..#", ".######.#.", "......###.", "......#...",
+            "......#...", ".....#....", "....#.....", "..##......", "##........",
+        ],
+        'レ' => [
+            ".#........", ".#........", ".#........", ".#.......#", ".#......#.",
+            ".#.....#..", ".#....#...", ".#...#....", ".#.##.....", ".##.......",
         ],
         'サ' => [
             "..#....#..", "..#....#..", "##########", "..#....#..", "..#....#..",
@@ -572,7 +580,7 @@ fn kana(ch: char, vertical: bool) -> Option<[&'static str; 10]> {
 }
 
 /// Neon sign texts: katakana and their meaning in Latin letters.
-pub const NEON_TEXT: [(&str, &str); 4] = [("ペガサス", "PEGASUS"), ("ネオン", "NEON"), ("ターボ", "TURBO"), ("サクラ", "SAKURA")];
+pub const NEON_TEXT: [(&str, &str); 4] = [("スロップレーサー", "SLOPRACER"), ("ネオン", "NEON"), ("ターボ", "TURBO"), ("サクラ", "SAKURA")];
 
 /// Paint a glowing tube: white-hot core, coloured edge and a soft halo.
 fn neon_strokes(b: &mut Bitmap, on: &dyn Fn(i32, i32) -> bool, x0: i32, y0: i32, w: i32, h: i32) {
@@ -632,10 +640,10 @@ fn pole(b: &mut Bitmap, x0: i32, y0: i32, y1: i32) {
 
 /// Tall vertical sign with katakana written top to bottom.
 fn make_neon_sign(text: &str) -> Bitmap {
-    let (w, h) = (22, 76);
-    let mut b = Bitmap::new(w, h);
     let n = text.chars().count() as i32;
     let ph = n * 12 + 6;
+    let (w, h) = (22, (ph + 22).max(76) as usize);
+    let mut b = Bitmap::new(w, h);
     pole(&mut b, 10, ph, h as i32);
     neon_panel(&mut b, 0, 0, w as i32, ph);
     kana_line(&mut b, text, 6, 4, true);
@@ -644,9 +652,10 @@ fn make_neon_sign(text: &str) -> Bitmap {
 
 /// Wide sign: katakana on top, the Latin reading below.
 fn make_neon_board(kana_text: &str, latin: &str) -> Bitmap {
-    let (w, h) = (66, 44);
+    let w = 66.max(kana_text.chars().count() * 12 + 12).max(latin.chars().count() * 6 + 12);
+    let h = 44;
     let mut b = Bitmap::new(w, h);
-    for x in [12, 52] {
+    for x in [w as i32 / 2 - 20, w as i32 / 2 + 20] {
         pole(&mut b, x, 30, h as i32);
     }
     neon_panel(&mut b, 0, 0, w as i32, 31);
@@ -1070,13 +1079,14 @@ fn make_vending() -> Bitmap {
 }
 
 /// Japanese expressway signs: katakana and their romaji, distance in km.
-pub const ROAD_SIGNS: [(&str, &str); 4] = [("サクラ", "SAKURA 12"), ("ペガサス", "PEGASUS 5"), ("ネオン", "NEON 24"), ("ターボ", "TURBO 31")];
+pub const ROAD_SIGNS: [(&str, &str); 4] = [("サクラ", "SAKURA 12"), ("スロップレーサー", "SLOPRACER 5"), ("ネオン", "NEON 24"), ("ターボ", "TURBO 31")];
 
 /// Green expressway sign with white lettering and snow along its top.
 fn make_road_sign(kana_text: &str, latin: &str) -> Bitmap {
-    let (w, h) = (66, 48);
+    let w = 66.max(kana_text.chars().count() * 12 + 12).max(latin.chars().count() * 6 + 12);
+    let h = 48;
     let mut b = Bitmap::new(w, h);
-    for x in [12, 52] {
+    for x in [w as i32 / 5, w as i32 * 4 / 5] {
         for y in 32..h as i32 {
             b.rgb(x, y, Rgb(196, 200, 210));
             b.rgb(x + 1, y, Rgb(120, 124, 138));
@@ -1191,7 +1201,7 @@ pub struct Sprites {
     pub snow_pole: Bitmap,
 }
 
-pub const BILLBOARD_TEXT: [&str; 5] = ["PEGASUS", "TURBO", "VOLT OIL", "F1", "ZORKA"];
+pub const BILLBOARD_TEXT: [&str; 5] = ["SLOPRACER", "TURBO", "VOLT OIL", "F1", "ZORKA"];
 
 pub fn get() -> &'static Sprites {
     static S: OnceLock<Sprites> = OnceLock::new();
@@ -1229,6 +1239,26 @@ pub fn get() -> &'static Sprites {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slopracer_signs_have_all_glyphs_and_fit_their_panels() {
+        assert_eq!(BILLBOARD_TEXT[0], "SLOPRACER");
+        for (japanese, latin) in NEON_TEXT.iter().chain(ROAD_SIGNS.iter()) {
+            for character in japanese.chars() {
+                let rows = kana(character, false).expect("missing horizontal sign glyph");
+                assert!(rows.iter().all(|row| row.len() == 10));
+                assert!(kana(character, true).is_some());
+            }
+            let board = make_neon_board(japanese, latin);
+            let road_sign = make_road_sign(japanese, latin);
+            let sign = make_neon_sign(japanese);
+            let japanese_width = japanese.chars().count() * 12 - 2;
+            let latin_width = crate::gfx::text_width(latin, 1) as usize;
+            assert!(board.w >= japanese_width + 12 && board.w >= latin_width + 12);
+            assert!(road_sign.w >= japanese_width + 12 && road_sign.w >= latin_width + 12);
+            assert!(sign.h >= japanese.chars().count() * 12 + 6);
+        }
+    }
 
     /// Writes the synthwave sprites, enlarged 4x, to `target/snapshots/sprites.ppm`.
     #[test]

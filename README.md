@@ -1,16 +1,16 @@
 <img src="assets/icon.svg" width="64" height="64" alt="">
 
-# pegasus-f1
+# Slopracer F1
 
-A retro pseudo-3D Formula racer for the terminal, inspired by the F1
-cartridges on the Pegasus / Famicom-clone consoles, with graphics a console
-generation later: 16-bit style. Written in Rust with [ratatui](https://ratatui.rs).
+A retro pseudo-3D Formula racer for the terminal (and the browser), inspired by the F1
+cartridges on 8-bit Famicom-clone consoles, with PS1-inspired 3D cars
+and detailed software-rendered scenery. Written in Rust with [ratatui](https://ratatui.rs).
 Sound comes from a tiny chiptune-style synth (pulse-wave engine, beeps and noise)
 via [cpal](https://github.com/RustAudio/cpal), plus an exclusive soundtrack
 for each Japanese track.
 
-![Neon Sakura](assets/screenshot-synthwave.png)
-![Shirayuki Pass](assets/screenshot-winter.png)
+![Neon Sakura — perspective-rendered cars](assets/ps1-neon-sakura.png)
+![Shirayuki Pass — winter racing](assets/ps1-shirayuki-pass.png)
 
 ## Play
 
@@ -25,18 +25,57 @@ terminal setup before the menu. Press any key to skip it, or start with
 Options: `--mute`, `--no-intro`, `--truecolor` / `--256` (colour mode is auto-detected),
 `--pixels` / `--quadrant` / `--halfblock` (graphics mode, see below).
 
+### In the browser
+
+The same game also compiles to WebAssembly. It needs
+[wasm-pack](https://rustwasm.github.io/wasm-pack/) and the `wasm32-unknown-unknown`
+target (`rustup target add wasm32-unknown-unknown`):
+
+```sh
+web/build.sh                         # builds web/pkg
+python3 -m http.server -d web 8000   # then open http://localhost:8000
+```
+
+`web/` is a self-contained static site (`index.html` + `pkg/`), ready for
+GitHub Pages or any static host. The browser version draws the same ratatui UI
+onto a canvas with the game at full pixel resolution underneath, and it
+supports all three graphics modes. Browsers report key releases, so you
+always hold `↑` to accelerate. Sound, gamepads, and saved settings
+(in localStorage) all work. Click or press a key to power it on: browsers only
+allow audio after a user gesture.
+
+### Deploy to Cloudflare Pages
+
+Build the browser version, then deploy it to the `slopracer-f1` Pages project:
+
+```sh
+web/build.sh
+npx --yes wrangler@4.156.0 pages deploy web --project-name slopracer-f1 --branch main
+```
+
+The deployment uses your Cloudflare login. Generated WebAssembly files and
+local credentials are excluded from Git. The native terminal game remains
+available through `cargo run --release`.
+
 ## Graphics modes
 
 Switch between modes at any time with `V` (or in the menu):
 
 | Mode | Resolution | Works in |
 | --- | --- | --- |
-| **Pixels** | true ~16-bit console resolution (e.g. 384×216) | kitty, Ghostty, WezTerm (kitty graphics protocol, auto-detected) |
+| **Pixels** | detailed console graphics, up to 448 pixels high | kitty, Ghostty, WezTerm (kitty graphics protocol, auto-detected) |
 | **Quadrant** (default elsewhere) | 2×2 pixels per character cell | any terminal with a Unicode font |
 | **Half blocks** | 1×2 pixels per character cell | any terminal |
 
 In the text modes, the resolution depends on the terminal size, so a smaller
 font (`Cmd -`) or a bigger window gives sharper graphics.
+
+Nearby cars use perspective-projected 3D meshes with depth-tested surfaces,
+directional lighting, rounded tyres, alloy hubs, suspension, mirrors and team liveries.
+Sponsor boards also have 3D frames and supports. The road has asphalt grain,
+rubber wear, bevelled kerbs and textured verges. Soft clouds, sun halos and
+distance haze preserve each track's atmosphere without forced pixelation or colour reduction.
+Half-block and quadrant modes remain available. Tracks, controls, physics and race rules are unchanged.
 
 | Key | Action |
 | --- | --- |
@@ -104,7 +143,7 @@ Three original tracks are locked by default: **Danube Ring** (sunny
 parkland), **Carpathian Circuit** (twisty mountain road at sunset) and
 **Baltic Night GP** (night race under the lights). Unlock them under
 *Settings → Classics* in the menu. The choice is saved to
-`~/.config/pegasus-f1/settings` (or `$XDG_CONFIG_HOME/pegasus-f1/settings`).
+`~/.config/slopracer-f1/settings` (or `$XDG_CONFIG_HOME/slopracer-f1/settings`).
 
 ![Danube Ring](assets/screenshot-day.png)
 ![Carpathian Circuit](assets/screenshot-sunset.png)

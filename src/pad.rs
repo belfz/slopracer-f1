@@ -53,9 +53,10 @@ impl Pad {
         self.gilrs.iter().flat_map(|g| g.gamepads().map(|(_, p)| p))
     }
 
-    /// Name of the first connected controller.
+    /// Name of the first connected controller. Browsers append vendor
+    /// details in parentheses, which are dropped.
     pub fn name(&self) -> Option<String> {
-        self.pads().next().map(|p| p.name().to_string())
+        self.pads().next().map(|p| p.name().split(" (").next().unwrap_or_default().trim().to_string())
     }
 
     pub fn connected(&self) -> bool {

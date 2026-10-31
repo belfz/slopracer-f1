@@ -1,11 +1,13 @@
-//! Pseudo-3D road renderer in the 16-bit tradition: segment projection with
-//! curves and hills, layered parallax backdrop, anti-aliased road edges and
-//! supersampled sprite scaling with hill-crest occlusion.
+//! Racing scene with textured terrain, atmospheric backdrops and perspective
+//! car meshes. Road projection and scenery placement share the race geometry.
 
 use crate::gfx::{FrameBuf, Rgb};
 use crate::sprites::Bitmap;
 use crate::track::{Backdrop, Palette, Track, ROAD_HALF};
 use std::f32::consts::TAU;
+
+#[path = "motorsport.rs"]
+mod motorsport;
 
 /// Distance (m) from the camera to the ground at the bottom screen row.
 pub const Z_NEAR: f32 = 4.0;
@@ -155,21 +157,70 @@ pub fn render_world(fb: &mut FrameBuf, track: &Track, cam: &Camera, sprites: &mu
         let t = f - i as f32;
         let (a, b) = (pts[i], pts[i + 1]);
         let xo = a.xo + (b.xo - a.xo) * t;
-        let y = a.y + (b.y - a.y) * t + s.lift;
+        let road_y = a.y + (b.y - a.y) * t;
+        let y = road_y + s.lift;
         let base = v.hz + (cam_y - y) * v.focal_y / s.z;
         let sx = w as f32 / 2.0 + (xo + s.x - cam.x) * focal_x / s.z;
         let wpx = s.width_m * focal_x / s.z;
         let hpx = s.width_m * s.bmp.h as f32 / s.bmp.w as f32 * v.focal_y / s.z;
         let clip_y = seg_clip[i];
-        if s.shadow {
+        let art = crate::sprites::get();
+        let car_angle = if std::ptr::eq(s.bmp, &art.car_rear) {
+            Some(0.0)
+        } else if std::ptr::eq(s.bmp, &art.car_front) {
+            Some(std::f32::consts::PI)
+        } else if std::ptr::eq(s.bmp, &art.car_side) {
+            Some(if s.flip { -std::f32::consts::FRAC_PI_2 } else { std::f32::consts::FRAC_PI_2 })
+        } else {
+            None
+        };
+        if s.shadow && !(car_angle.is_some() && wpx >= 4.0) {
             let ry = (wpx * 0.09 * v.aspect).max(1.0);
             let sy = base - ry * 0.3;
             if sy < clip_y {
-                fb.ellipse(sx, sy, wpx * 0.56, ry, Rgb(0, 0, 0), 0.38);
+                for (size, opacity) in [(1.16, 0.07), (1.0, 0.13), (0.82, 0.19)] {
+                    fb.ellipse(sx, sy, wpx * 0.56 * size, ry * size, Rgb(8, 12, 20), opacity);
+                }
+            }
+        }
+        if let Some(angle) = car_angle {
+            if wpx >= 4.0 {
+                let start = i.saturating_sub(1).min(n - 5);
+                let ground = motorsport::GroundProfile {
+                    start: pts[start].z - s.z,
+                    heights: std::array::from_fn(|offset| pts[start + offset].y - road_y),
+                };
+                motorsport::draw_car(fb, &motorsport::ModelView {
+                    focal_x, focal_y: v.focal_y, horizon: v.hz,
+                    camera_height: cam_y - road_y, lateral: xo + s.x - cam.x,
+                    distance: s.z, grade: (b.y - a.y) / SEG,
+                    ground: Some(ground), lift: s.lift, travel: cam.d + s.z,
+                    yaw: car_yaw(angle, (b.xo - a.xo) / SEG, s.skew),
+                    clip: clip_y, body: s.body, light: pal.light,
+                    fog_color: pal.fog, fog: fog_at(s.z),
+                });
+                continue;
+            }
+        }
+        if wpx > 8.0 {
+            if let Some(index) = art.billboards.iter().position(|bitmap| std::ptr::eq(s.bmp, bitmap)) {
+                motorsport::draw_billboard(fb, &motorsport::ModelView {
+                    focal_x, focal_y: v.focal_y, horizon: v.hz,
+                    camera_height: cam_y - y, lateral: xo + s.x - cam.x,
+                    distance: s.z, grade: 0.0, yaw: s.x.signum() * 0.25,
+                    ground: None, lift: 0.0, travel: 0.0,
+                    clip: clip_y, body: s.body, light: pal.light,
+                    fog_color: pal.fog, fog: fog_at(s.z),
+                }, index);
+                continue;
             }
         }
         draw_sprite(fb, s, sx, base, wpx, hpx, clip_y, pal.light, pal.fog, fog_at(s.z));
     }
+}
+
+fn car_yaw(angle: f32, road_direction: f32, steering: i32) -> f32 {
+    angle + road_direction.atan() + steering as f32 * 0.045
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -177,8 +228,10 @@ fn draw_road_row(fb: &mut FrameBuf, y: usize, cx: f32, scale: f32, d: f32, span:
     let pal = &track.palette;
     let stripe = ((d / STRIPE).floor() as i64).rem_euclid(2) as usize;
     let f = |c: Rgb| c.lerp(pal.fog, fog);
-    let grass = f(pal.grass[stripe]);
-    let road = f(pal.road[stripe]);
+    let grass_base = if pal.snow || pal.grid.is_some() { pal.grass[stripe] } else { pal.grass[stripe].lerp(Rgb(91, 110, 60), 0.32) };
+    let grass = f(grass_base);
+    let road_base = pal.road[0].lerp(pal.road[1], 0.5).lerp(pal.road[stripe], 0.18);
+    let road = f(road_base);
     let rumble = f(pal.rumble[stripe]);
     let lane = f(pal.lane);
     let (white, black) = (f(Rgb(236, 236, 236)), f(Rgb(22, 22, 22)));
@@ -188,6 +241,10 @@ fn draw_road_row(fb: &mut FrameBuf, y: usize, cx: f32, scale: f32, d: f32, span:
     let grid_mark = (track.length - dm) < 75.0 && (track.length - dm) % 12.0 < 0.5;
     let dashes = stripe == 0;
     let mpp = 1.0 / scale;
+    let detail = (1.0 - mpp / 0.24).clamp(0.0, 1.0) * (1.0 - fog);
+    let texture_row = (d * 12.0).floor() as i64 as u32;
+    let grass_row = (d * 2.0).floor() as i64 as u32;
+    let rubber_amount = 0.045 + track.curve_at(d).abs().min(0.01) * 4.0;
     // Neon grid: the share of this row's depth range covered by cross lines.
     let grid = pal.grid.map(|g| {
         let covered = |x: f32| {
@@ -209,15 +266,28 @@ fn draw_road_row(fb: &mut FrameBuf, y: usize, cx: f32, scale: f32, d: f32, span:
             } else if grid_mark && (1.2..3.2).contains(&a) {
                 white
             } else {
-                road
+                let cell = (rel * 12.0).floor() as i32 as u32;
+                let grain = (hash(cell.wrapping_mul(73_856_093) ^ texture_row.wrapping_mul(19_349_663)) & 255) as f32 / 255.0 - 0.5;
+                let groove = (1.0 - ((a - 2.1) / 0.40).abs()).max(0.0);
+                let rubber = groove * rubber_amount;
+                road.scale(1.0 + grain * 0.11 * detail - rubber * (1.0 - fog))
             }
         } else if a <= ROAD_HALF + 0.9 {
-            rumble
+            let bevel = ((a - ROAD_HALF) / 0.9 * 3.0).floor() / 3.0;
+            rumble.scale(1.06 - bevel * 0.18)
         } else if let Some((line, cross, ground)) = grid {
             let along = (rel.rem_euclid(GRID) < GRID_LINE) as u8 as f32;
             ground.lerp(line, along.max(cross))
         } else {
-            grass
+            let cell = (rel * 12.0).floor() as i32 as u32;
+            let grain = (hash(cell.wrapping_mul(83_492_791) ^ texture_row.wrapping_mul(29_765_719)) & 255) as f32 / 255.0 - 0.5;
+            let patch = (hash(((rel * 0.5).floor() as i32 as u32) ^ grass_row) & 255) as f32 / 255.0 - 0.5;
+            if a < ROAD_HALF + 1.35 && !pal.snow {
+                f(Rgb(140, 133, 104)).scale(1.0 + grain * 0.18 * detail)
+            } else {
+                let strength = if pal.snow { 0.035 } else { 0.10 };
+                grass.scale(1.0 + (grain * strength + patch * 0.025) * detail)
+            }
         }
     };
     let zone = |rel: f32| -> u8 {
@@ -328,6 +398,65 @@ fn rolling(u: f32, seed: f32) -> f32 {
     0.5 + 0.28 * (u + seed).sin() + 0.14 * (u * 2.7 + seed * 3.0).sin() + 0.06 * (u * 7.3 + seed).sin()
 }
 
+fn cloud_noise(horizontal: f32, vertical: f32) -> f32 {
+    let column = horizontal.floor() as i32;
+    let row = vertical.floor() as i32;
+    let smooth = |value: f32| value * value * (3.0 - 2.0 * value);
+    let across = smooth(horizontal - horizontal.floor());
+    let down = smooth(vertical - vertical.floor());
+    let sample = |column: i32, row: i32| {
+        hashf((column as u32).wrapping_mul(73_856_093) ^ (row as u32).wrapping_mul(19_349_663))
+    };
+    let upper = sample(column, row) * (1.0 - across) + sample(column + 1, row) * across;
+    let lower = sample(column, row + 1) * (1.0 - across) + sample(column + 1, row + 1) * across;
+    upper * (1.0 - down) + lower * down
+}
+
+fn draw_clouds(frame: &mut FrameBuf, view: &View, cloud: Rgb, scroll: f32, time: f32) {
+    for pixel_y in 0..(view.hz * 0.83) as usize {
+        let altitude = pixel_y as f32 / view.hz;
+        let vertical = altitude * 5.0 + 8.0;
+        let envelope = (1.0 - ((altitude - 0.35) / 0.48).abs()).max(0.0);
+        for pixel_x in 0..frame.w {
+            let horizontal = (pixel_x as f32 / frame.w as f32 + scroll * 0.25 + time * 0.0012) * 7.0 + 13.0;
+            let broad = cloud_noise(horizontal, vertical);
+            let fine = cloud_noise(horizontal * 3.1 + 7.0, vertical * 3.1);
+            let detail = cloud_noise(horizontal * 8.3, vertical * 8.3 + 3.0);
+            let density = (broad * 0.62 + fine * 0.26 + detail * 0.12 - 0.47) * 5.5 * envelope;
+            let opacity = density.clamp(0.0, 0.94);
+            if opacity > 0.0 {
+                let shade = cloud.scale(0.87 + fine * 0.12).lerp(Rgb(198, 215, 232), (1.0 - broad) * 0.12);
+                frame.blend(pixel_x as i32, pixel_y as i32, shade, opacity);
+            }
+        }
+    }
+}
+
+fn draw_halo(frame: &mut FrameBuf, center: (f32, f32), radius: f32, aspect: f32, color: Rgb, strength: f32) {
+    let horizontal_radius = radius / aspect;
+    let left = (center.0 - horizontal_radius * 3.0).floor().max(0.0) as usize;
+    let right = (center.0 + horizontal_radius * 3.0).ceil().min(frame.w as f32).max(0.0) as usize;
+    let top = (center.1 - radius * 3.0).floor().max(0.0) as usize;
+    let bottom = (center.1 + radius * 3.0).ceil().min(frame.h as f32).max(0.0) as usize;
+    for pixel_y in top..bottom {
+        for pixel_x in left..right {
+            let horizontal = (pixel_x as f32 + 0.5 - center.0) / horizontal_radius;
+            let vertical = (pixel_y as f32 + 0.5 - center.1) / radius;
+            let opacity = (-(horizontal * horizontal + vertical * vertical) * 0.5).exp() * strength;
+            frame.blend(pixel_x as i32, pixel_y as i32, color, opacity);
+        }
+    }
+}
+
+fn draw_distant_ground(frame: &mut FrameBuf, view: &View, palette: &Palette) {
+    let horizon = view.hz.ceil() as usize;
+    for row in horizon.min(frame.h)..frame.h {
+        let depth = ((row as f32 - view.hz) / (view.h as f32 - view.hz)).sqrt();
+        let color = palette.grass[0].lerp(palette.fog, 0.82 * (1.0 - depth));
+        frame.row_mut(row).fill(color);
+    }
+}
+
 fn draw_backdrop(fb: &mut FrameBuf, v: &View, pal: &Palette, bg: f32, time: f32) {
     let (w, h) = (v.w, v.h);
     let wf = w as f32;
@@ -345,7 +474,7 @@ fn draw_backdrop(fb: &mut FrameBuf, v: &View, pal: &Palette, bg: f32, time: f32)
     }
 
     if pal.stars {
-        let n = (w * hzi / 40) as u32;
+        let n = (w * hzi / 110).min(220) as u32;
         for i in 0..n {
             let x = ((hashf(i * 3 + 1) - bg * 0.1) * wf).rem_euclid(wf);
             let y = hashf(i * 3 + 2) * hz * 0.8;
@@ -366,9 +495,7 @@ fn draw_backdrop(fb: &mut FrameBuf, v: &View, pal: &Palette, bg: f32, time: f32)
         let sx = (wf * 0.72 - bg * wf * 0.15).rem_euclid(wf * 1.6) - wf * 0.3;
         let sy = hz * if pal.stars { 0.28 } else { 0.5 };
         let r = (h as f32 * 0.06).max(2.0);
-        for (k, a) in [(2.2, 0.12), (1.6, 0.2), (1.25, 0.35)] {
-            fb.ellipse(sx, sy, r * k / v.aspect, r * k, sun, a);
-        }
+        draw_halo(fb, (sx, sy), r * 1.8, v.aspect, sun, 0.24);
         fb.ellipse(sx, sy, r / v.aspect, r, sun, 1.0);
         if pal.stars {
             // Moon craters.
@@ -378,23 +505,8 @@ fn draw_backdrop(fb: &mut FrameBuf, v: &View, pal: &Palette, bg: f32, time: f32)
         }
     }
 
-    // Clouds drifting with time and the road's curves.
     if let Some(cloud) = pal.clouds {
-        for k in 0..9u32 {
-            let span = 1.6;
-            let cxu = (hashf(k * 5 + 1) * span - bg * 0.25 + time * 0.004 * (1.0 + hashf(k))).rem_euclid(span) - 0.3;
-            let cx = cxu * wf;
-            let cy = hz * (0.12 + hashf(k * 5 + 2) * 0.42);
-            let size = h as f32 * (0.035 + hashf(k * 5 + 3) * 0.04);
-            let puffs = 4 + (hash(k) % 3) as usize;
-            for p in 0..puffs {
-                let px = cx + (p as f32 - puffs as f32 / 2.0) * size * 0.9 / v.aspect;
-                let pr = size * (0.7 + hashf(k * 13 + p as u32) * 0.6);
-                let py = cy - pr * 0.35;
-                fb.ellipse(px, py + pr * 0.25, pr * 1.1 / v.aspect, pr * 0.85, cloud.scale(0.78).lerp(pal.sky[2], 0.3), 1.0);
-                fb.ellipse(px - pr * 0.1 / v.aspect, py, pr / v.aspect, pr * 0.8, cloud, 1.0);
-            }
-        }
+        draw_clouds(fb, v, cloud, bg, time);
     }
 
     // Far layer: jagged mountains or a city skyline.
@@ -425,13 +537,13 @@ fn draw_backdrop(fb: &mut FrameBuf, v: &View, pal: &Palette, bg: f32, time: f32)
                 let u = x as f32 / wf + bg * 0.45;
                 let bi = (u * cols).floor() as i64;
                 let local = ((u * cols).fract() * wf / cols) as i32;
-                let bh = 0.12 + hashf(bi as u32 * 7 + 3) * 0.32;
+                let bh = 0.12 + hashf((bi as u32).wrapping_mul(7).wrapping_add(3)) * 0.32;
                 let top = hz - hz * bh;
                 let tint = pal.far_hills.scale(0.8 + hashf(bi as u32) * 0.4);
                 for y in top.max(0.0) as usize..hzi.min(h) {
                     let ly = y as i32 - top as i32;
                     let window = local % 3 == 1 && ly % 3 == 1 && ly > 1;
-                    let lit_w = hash((bi as u32).wrapping_mul(131) ^ ((local / 3) as u32 * 17) ^ (ly as u32 / 3 * 7919)).is_multiple_of(3);
+                    let lit_w = hash((bi as u32).wrapping_mul(131) ^ ((local / 3) as u32).wrapping_mul(17) ^ (ly as u32 / 3 * 7919)).is_multiple_of(3);
                     let c = if window && lit_w { Rgb(255, 210, 110) } else { tint };
                     fb.set(x as i32, y as i32, c);
                 }
@@ -454,10 +566,7 @@ fn draw_backdrop(fb: &mut FrameBuf, v: &View, pal: &Palette, bg: f32, time: f32)
     }
 
     // Distant ground below the horizon (seen past crests).
-    let ground = pal.grass[0].lerp(pal.fog, 0.85);
-    for y in hzi.min(h)..h {
-        fb.row_mut(y).fill(ground);
-    }
+    draw_distant_ground(fb, v, pal);
 }
 
 /// Synthwave sunset: striped retro sun sinking behind neon wireframe
@@ -469,7 +578,7 @@ fn draw_synth_backdrop(fb: &mut FrameBuf, v: &View, pal: &Palette, bg: f32, time
     let neon = pal.grid.unwrap_or(Rgb(255, 46, 196));
 
     // Stars fading out towards the warm horizon.
-    let n = (w * hzi / 110) as u32;
+    let n = (w * hzi / 140).min(140) as u32;
     for i in 0..n {
         let x = ((hashf(i * 3 + 1) - bg * 0.1) * wf).rem_euclid(wf);
         let yt = hashf(i * 3 + 2).powf(1.6) * 0.55;
@@ -553,9 +662,9 @@ fn draw_synth_backdrop(fb: &mut FrameBuf, v: &View, pal: &Palette, bg: f32, time
         let bi = (u * cols).floor() as i64;
         let fx = (u * cols).fract();
         let id = bi as u32;
-        let pagoda = hash(id * 31 + 5).is_multiple_of(7);
-        let gap = hash(id * 13 + 1).is_multiple_of(4);
-        let bh = if pagoda { 0.2 } else { 0.05 + hashf(id * 7 + 3) * 0.17 };
+        let pagoda = hash(id.wrapping_mul(31).wrapping_add(5)).is_multiple_of(7);
+        let gap = hash(id.wrapping_mul(13).wrapping_add(1)).is_multiple_of(4);
+        let bh = if pagoda { 0.2 } else { 0.05 + hashf(id.wrapping_mul(7).wrapping_add(3)) * 0.17 };
         let mut top = hz - hz * bh;
         if pagoda {
             // Five tiers, each roof narrower, with a spire on top.
@@ -575,7 +684,7 @@ fn draw_synth_backdrop(fb: &mut FrameBuf, v: &View, pal: &Palette, bg: f32, time
             };
         } else if gap {
             top = hz - hz * 0.03;
-        } else if hash(id * 3 + 9).is_multiple_of(9) && (fx - 0.5).abs() < 0.04 {
+        } else if hash(id.wrapping_mul(3).wrapping_add(9)).is_multiple_of(9) && (fx - 0.5).abs() < 0.04 {
             top -= hz * 0.08;
         }
         let tint = pal.near_hills.scale(0.85 + hashf(id) * 0.4);
@@ -625,10 +734,7 @@ fn draw_winter_backdrop(fb: &mut FrameBuf, v: &View, pal: &Palette, bg: f32, tim
     let sx = (wf * 0.8 - bg * wf * 0.15).rem_euclid(wf * 1.6) - wf * 0.3;
     let sy = hz * 0.36;
     let r = (h as f32 * 0.045).max(1.5);
-    for k in (0..14).rev() {
-        let f = 1.3 + k as f32 * 0.55;
-        fb.ellipse(sx, sy, r * f / aspect, r * f, Rgb(255, 222, 170), 0.045);
-    }
+    draw_halo(fb, (sx, sy), r * 3.2, aspect, Rgb(255, 222, 170), 0.38);
     fb.ellipse(sx, sy, r * 9.0 / aspect, r * 0.22, Rgb(255, 236, 200), 0.2);
     fb.ellipse(sx, sy, r / aspect, r, sun.lerp(Rgb(255, 255, 255), 0.6), 1.0);
 
@@ -745,11 +851,11 @@ fn draw_winter_backdrop(fb: &mut FrameBuf, v: &View, pal: &Palette, bg: f32, tim
             }
             continue;
         }
-        if hash(id * 13 + 7).is_multiple_of(3) {
+        if hash(id.wrapping_mul(13).wrapping_add(7)).is_multiple_of(3) {
             continue;
         }
-        let pagoda = hash(id * 29 + 3).is_multiple_of(13);
-        let bh = if pagoda { 0.12 } else { 0.03 + hashf(id * 7 + 1) * 0.06 };
+        let pagoda = hash(id.wrapping_mul(29).wrapping_add(3)).is_multiple_of(13);
+        let bh = if pagoda { 0.12 } else { 0.03 + hashf(id.wrapping_mul(7).wrapping_add(1)) * 0.06 };
         let top = hz - hz * bh;
         let wall = walls[(hash(id) % walls.len() as u32) as usize];
         let px_w = (wf / cols).max(1.0);
@@ -767,7 +873,7 @@ fn draw_winter_backdrop(fb: &mut FrameBuf, v: &View, pal: &Palette, bg: f32, tim
             } else if ly == 0 {
                 Rgb(250, 252, 255)
             } else if lx % 3 == 1 && ly % 3 == 2 && lx < px_w as i32 - 1 {
-                if hash(id.wrapping_mul(97) ^ (lx as u32 * 31) ^ (ly as u32 * 7)).is_multiple_of(4) {
+                if hash(id.wrapping_mul(97) ^ (lx as u32).wrapping_mul(31) ^ (ly as u32).wrapping_mul(7)).is_multiple_of(4) {
                     Rgb(255, 214, 140)
                 } else {
                     wall.scale(0.62)
@@ -873,6 +979,70 @@ mod tests {
     use crate::track::all_tracks;
     use std::rc::Rc;
 
+    #[test]
+    fn steering_yaw_points_the_nose_in_the_input_direction() {
+        for steering in [-2, -1, 1, 2] {
+            let yaw = car_yaw(0.0, 0.0, steering);
+            let nose_offset = 3.94 * yaw.sin();
+            assert_eq!(nose_offset.signum(), (steering as f32).signum());
+            let road = 0.12;
+            assert!((car_yaw(0.0, road, steering) - road.atan() - yaw).abs() < 0.00001);
+        }
+    }
+
+    #[test]
+    #[ignore = "writes steering screenshots and wheel-animation frames"]
+    fn steering_and_wheel_showcase_frames() {
+        let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/screenshots/handling");
+        std::fs::create_dir_all(&directory).unwrap();
+        let track = Rc::new(all_tracks().remove(0));
+        for (name, steer) in [("left", -1.0), ("straight", 0.0), ("right", 1.0)] {
+            let mut race = Race::new(track.clone(), 3, false, true);
+            race.phase = crate::race::Phase::Racing;
+            race.rivals.clear();
+            race.d = 160.0;
+            race.x = 0.0;
+            race.update(1.0 / 60.0, crate::race::Controls { steer, ..Default::default() });
+            let mut sprites = Vec::new();
+            race.sprites(&mut sprites);
+            let mut frame = FrameBuf::new();
+            frame.resize(800, 448);
+            render_world(&mut frame, &track, &Camera { d: race.cam_d(), x: race.x, bg: race.bg }, &mut sprites, race.time, 1.0);
+            write_ppm(&directory.join(format!("{name}.ppm")), frame.w, frame.h, |pixel_x, pixel_y| frame.get(pixel_x, pixel_y));
+        }
+        for index in 0..36 {
+            let mut frame = FrameBuf::new();
+            frame.resize(640, 400);
+            frame.fill_rect(0, 0, 640, 400, Rgb(70, 75, 80));
+            motorsport::draw_car(&mut frame, &motorsport::ModelView {
+                focal_x: 370.0, focal_y: 370.0, horizon: 65.0, camera_height: 2.8,
+                lateral: 0.0, distance: 4.6, grade: 0.0, yaw: 0.45, clip: 400.0,
+                ground: None, lift: 0.0, travel: index as f32 * 0.055,
+                body: track.palette.car, light: 1.0, fog_color: track.palette.fog, fog: 0.0,
+            });
+            write_ppm(&directory.join(format!("wheel-{index:02}.ppm")), frame.w, frame.h, |pixel_x, pixel_y| frame.get(pixel_x, pixel_y));
+        }
+    }
+
+    #[test]
+    fn racing_showcase_frames() {
+        let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/screenshots");
+        std::fs::create_dir_all(&directory).unwrap();
+        for (index, track) in all_tracks().into_iter().enumerate() {
+            let mut race = Race::new(Rc::new(track), 3, true, true);
+            for _ in 0..60 * (9 + index * 7) {
+                race.update(1.0 / 60.0, Default::default());
+            }
+            let mut sprites = Vec::new();
+            let camera = Camera { d: race.cam_d(), x: race.x, bg: race.bg };
+            let mut frame = FrameBuf::new();
+            frame.resize(800, 448);
+            race.sprites(&mut sprites);
+            render_world(&mut frame, &race.track, &camera, &mut sprites, race.time, 1.0);
+            write_ppm(&directory.join(format!("race-{index}.ppm")), frame.w, frame.h, |pixel_x, pixel_y| frame.get(pixel_x, pixel_y));
+        }
+    }
+
     fn write_ppm(path: &std::path::Path, w: usize, h: usize, px: impl Fn(usize, usize) -> Rgb) {
         let mut out = format!("P6\n{w} {h}\n255\n").into_bytes();
         for y in 0..h {
@@ -906,7 +1076,7 @@ mod tests {
                 draw_start_lights(&mut fb, 3, 1.0);
             }
             if i == 1 {
-                draw_text_centered(&mut fb, "PEGASUS F1", 12, (4, 4), Rgb(255, 235, 80), Rgb(255, 90, 20), Some(Rgb(30, 10, 10)));
+                draw_text_centered(&mut fb, "Slopracer F1", 12, (4, 4), Rgb(255, 235, 80), Rgb(255, 90, 20), Some(Rgb(30, 10, 10)));
             }
             write_ppm(&dir.join(format!("pixels{i}.ppm")), fb.w, fb.h, |x, y| fb.get(x, y));
 

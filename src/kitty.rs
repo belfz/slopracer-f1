@@ -120,7 +120,7 @@ mod tests {
         let mut sprites = Vec::new();
         let mut kitty = Kitty::new();
         let mut sink = Vec::new();
-        for (w, h, scale) in [(384, 216, 2), (400, 224, 1), (400, 160, 1)] {
+        for (w, h, scale) in [(384, 216, 2), (400, 224, 1), (400, 160, 1), (800, 448, 1)] {
             fb.resize(w, h);
             let t = Instant::now();
             let n = 60;

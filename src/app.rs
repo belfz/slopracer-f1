@@ -3,14 +3,13 @@
 use crate::audio::{Audio, Sfx};
 use crate::boot::Boot;
 use crate::gfx::Mode;
-use crate::input::{Btn, Keys};
+use crate::input::{Btn, Key, KeyEvent, KeyKind, Keys};
 use crate::pad::{Pad, Press};
 use crate::race::{Controls, Race};
 use crate::settings::Settings;
 use crate::track::{all_tracks, Track};
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use std::rc::Rc;
-use std::time::Instant;
+use web_time::Instant;
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Screen {
@@ -143,37 +142,47 @@ impl App {
     }
 
     pub fn on_key(&mut self, k: KeyEvent, now: Instant) {
-        if let Some(b) = Btn::from_code(k.code) {
+        if let Some(b) = Btn::from_key(k.key) {
             self.keys.event(b, k.kind, now);
         }
-        if k.kind == KeyEventKind::Release {
+        if k.kind == KeyKind::Release {
             return;
         }
-        if k.modifiers.contains(KeyModifiers::CONTROL) && k.code == KeyCode::Char('c') {
+        if k.ctrl && k.key == Key::Char('c') {
             self.quit = true;
             return;
         }
-        if let KeyCode::Char('m' | 'M') = k.code {
-            if k.kind == KeyEventKind::Press {
+        if let Key::Char('m' | 'M') = k.key {
+            if k.kind == KeyKind::Press {
                 self.muted = self.audio.toggle_mute();
             }
             return;
         }
-        if let KeyCode::Char('v' | 'V') = k.code {
-            if k.kind == KeyEventKind::Press {
+        if let Key::Char('v' | 'V') = k.key {
+            if k.kind == KeyKind::Press {
                 self.cycle_mode(1);
             }
             return;
         }
         match self.screen {
             Screen::Boot => {
-                if k.kind == KeyEventKind::Press {
+                if k.kind == KeyKind::Press {
                     self.finish_boot();
                 }
             }
-            Screen::Menu => self.menu_key(k.code),
-            Screen::Race if k.kind == KeyEventKind::Press => self.race_key(k.code),
+            Screen::Menu => self.menu_key(k.key),
+            Screen::Race if k.kind == KeyKind::Press => self.race_key(k.key),
             Screen::Race => {}
+        }
+    }
+
+    /// The window lost focus (browser tab switch): forget held keys and
+    /// pause a race in progress.
+    pub fn focus_lost(&mut self) {
+        self.keys.clear();
+        let racing = self.race.as_ref().is_some_and(|r| r.finished_for().is_none());
+        if self.screen == Screen::Race && racing {
+            self.paused = true;
         }
     }
 
@@ -192,17 +201,17 @@ impl App {
                     self.finish_boot();
                     continue;
                 }
-                (Press::Up, _) => KeyCode::Up,
-                (Press::Down, _) => KeyCode::Down,
-                (Press::Left, _) => KeyCode::Left,
-                (Press::Right, _) => KeyCode::Right,
-                (Press::Confirm, _) | (Press::Start, Screen::Menu) => KeyCode::Enter,
-                (Press::Start, _) => KeyCode::Esc,
+                (Press::Up, _) => Key::Up,
+                (Press::Down, _) => Key::Down,
+                (Press::Left, _) => Key::Left,
+                (Press::Right, _) => Key::Right,
+                (Press::Confirm, _) | (Press::Start, Screen::Menu) => Key::Enter,
+                (Press::Start, _) => Key::Esc,
                 // Circle must not quit the game from the menu.
                 (Press::Back, Screen::Menu) => continue,
-                (Press::Back, _) => KeyCode::Char('q'),
-                (Press::Restart, _) => KeyCode::Char('r'),
-                (Press::Shift, _) => KeyCode::Char('g'),
+                (Press::Back, _) => Key::Char('q'),
+                (Press::Restart, _) => Key::Char('r'),
+                (Press::Shift, _) => Key::Char('g'),
             };
             match self.screen {
                 Screen::Menu => self.menu_key(code),
@@ -211,19 +220,19 @@ impl App {
         }
     }
 
-    fn menu_key(&mut self, code: KeyCode) {
+    fn menu_key(&mut self, code: Key) {
         let idx = MENU.iter().position(|&m| m == self.menu_item).unwrap_or(0);
         match code {
-            KeyCode::Up | KeyCode::Char('w' | 'k') => {
+            Key::Up | Key::Char('w' | 'k') => {
                 self.menu_item = MENU[(idx + MENU.len() - 1) % MENU.len()];
                 self.audio.play(Sfx::Blip);
             }
-            KeyCode::Down | KeyCode::Char('s' | 'j') | KeyCode::Tab => {
+            Key::Down | Key::Char('s' | 'j') | Key::Tab => {
                 self.menu_item = MENU[(idx + 1) % MENU.len()];
                 self.audio.play(Sfx::Blip);
             }
-            KeyCode::Left | KeyCode::Right | KeyCode::Char('a' | 'd') => {
-                let dir: i32 = if matches!(code, KeyCode::Left | KeyCode::Char('a')) { -1 } else { 1 };
+            Key::Left | Key::Right | Key::Char('a' | 'd') => {
+                let dir: i32 = if matches!(code, Key::Left | Key::Char('a')) { -1 } else { 1 };
                 match self.menu_item {
                     MenuItem::Track => {
                         let visible = self.visible_tracks();
@@ -240,38 +249,38 @@ impl App {
                 }
                 self.audio.play(Sfx::Blip);
             }
-            KeyCode::Enter | KeyCode::Char(' ') => self.start_race(),
-            KeyCode::Esc | KeyCode::Char('q' | 'Q') => self.quit = true,
+            Key::Enter | Key::Char(' ') => self.start_race(),
+            Key::Esc | Key::Char('q' | 'Q') => self.quit = true,
             _ => {}
         }
     }
 
-    fn race_key(&mut self, code: KeyCode) {
+    fn race_key(&mut self, code: Key) {
         let Some(race) = self.race.as_mut() else { return };
         let results = race.finished_for().is_some_and(|t| t > 2.5);
         if results {
             match code {
-                KeyCode::Enter | KeyCode::Esc => self.back_to_menu(),
-                KeyCode::Char('r' | 'R') => self.start_race(),
+                Key::Enter | Key::Esc => self.back_to_menu(),
+                Key::Char('r' | 'R') => self.start_race(),
                 _ => {}
             }
             return;
         }
         if self.paused {
             match code {
-                KeyCode::Esc | KeyCode::Char('p' | 'P') => self.paused = false,
-                KeyCode::Char('r' | 'R') => self.start_race(),
-                KeyCode::Char('q' | 'Q') => self.back_to_menu(),
+                Key::Esc | Key::Char('p' | 'P') => self.paused = false,
+                Key::Char('r' | 'R') => self.start_race(),
+                Key::Char('q' | 'Q') => self.back_to_menu(),
                 _ => {}
             }
             return;
         }
         match code {
-            KeyCode::Esc | KeyCode::Char('p' | 'P') => {
+            Key::Esc | Key::Char('p' | 'P') => {
                 self.paused = true;
                 self.keys.clear();
             }
-            KeyCode::Char(' ') | KeyCode::Char('g' | 'G') => race.shift(),
+            Key::Char(' ') | Key::Char('g' | 'G') => race.shift(),
             _ => {}
         }
     }
