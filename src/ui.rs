@@ -298,6 +298,7 @@ fn draw_race(frame: &mut Frame, app: &App, race: &Race, fb: &mut FrameBuf, sprit
     // --- World -----------------------------------------------------------
     let surf = surface(app, game);
     draw_scene(fb, race, sprites, &surf, app.clock);
+    crate::minimap::draw(fb, race, surf.aspect);
     if let Some(n) = race.lights() {
         draw_start_lights(fb, n, surf.aspect);
     }

@@ -13,6 +13,7 @@ pub mod input;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod kitty;
 pub mod music;
+mod minimap;
 pub mod pad;
 pub mod race;
 pub mod render;

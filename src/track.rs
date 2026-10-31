@@ -1,6 +1,7 @@
 //! Track layouts (curves and hills), colour palettes and roadside scenery.
 
 use crate::gfx::Rgb;
+use crate::minimap::TrackMap;
 use crate::music::Tune;
 use crate::sprites::{self, Bitmap, BILLBOARD_TEXT, NEON_TEXT, ROAD_SIGNS};
 use rand::{rngs::StdRng, Rng, SeedableRng};
@@ -195,6 +196,7 @@ pub struct Track {
     starts: Vec<f32>,
     base_heights: Vec<f32>,
     pub length: f32,
+    pub(crate) minimap: TrackMap,
     pub scenery: Vec<Scenery>,
     /// Soundtrack exclusive to this track, if any.
     pub music: Option<Tune>,
@@ -236,7 +238,8 @@ impl Track {
             _ => None,
         };
         let classic = music.is_none();
-        let mut t = Track { name, desc, palette, segments, starts, base_heights, length: acc, scenery: Vec::new(), music, classic };
+        let mut t = Track { name, desc, palette, segments, starts, base_heights, length: acc, minimap: TrackMap::default(), scenery: Vec::new(), music, classic };
+        t.minimap = TrackMap::from_track(&t);
         t.generate_scenery(style, seed);
         t
     }

@@ -100,6 +100,10 @@ costs speed, and you can't see what's behind the top of a hill. In manual mode, 
 off in the tight ones. Going off the road slows you down, and hitting a tree,
 a sign or another car sends you spinning.
 
+The race HUD includes a schematic track map in the top-right corner. The gold
+marker shows your position. Blue markers show the other cars. The striped mark
+shows the start/finish line. The map follows your progress through each lap.
+
 **Tip:** for the best controls, use a terminal that supports the kitty keyboard
 protocol (kitty, WezTerm, Ghostty, foot, recent iTerm2/Alacritty). It reports
 key releases, so you hold `↑` to accelerate. In other terminals (e.g. macOS
