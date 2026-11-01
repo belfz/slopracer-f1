@@ -234,6 +234,8 @@ fn draw_road_row(fb: &mut FrameBuf, y: usize, cx: f32, scale: f32, d: f32, span:
     let midnight = pal.backdrop == Backdrop::Midnight;
     let grass_base = if pal.snow || pal.grid.is_some() || midnight { pal.grass[stripe] } else { pal.grass[stripe].lerp(Rgb(91, 110, 60), 0.32) };
     let grass = f(grass_base);
+    let reflection = midnight.then(|| ([f(Rgb(220, 50, 150)), f(Rgb(45, 175, 215))], (d * 0.19635).sin() * 0.5 + 0.5));
+    let pavement_cross_seam = midnight && d.rem_euclid(4.0) < 0.06;
     let road_base = pal.road[0].lerp(pal.road[1], 0.5).lerp(pal.road[stripe], 0.18);
     let road = f(road_base);
     let rumble = f(pal.rumble[stripe]);
@@ -275,12 +277,11 @@ fn draw_road_row(fb: &mut FrameBuf, y: usize, cx: f32, scale: f32, d: f32, span:
                 let groove = (1.0 - ((a - 2.1) / 0.40).abs()).max(0.0);
                 let rubber = groove * rubber_amount;
                 let asphalt = road.scale(1.0 + grain * 0.11 * detail - rubber * (1.0 - fog));
-                if midnight {
-                    let neon = if rel < 0.0 { Rgb(220, 50, 150) } else { Rgb(45, 175, 215) };
+                if let Some((neon, pulse)) = reflection {
+                    let neon = neon[usize::from(rel >= 0.0)];
                     let streak = (1.0 - ((a - 3.5) / 1.3).abs()).max(0.0);
-                    let pulse = (d * 0.19635).sin() * 0.5 + 0.5;
                     let broken = 0.5 + 0.5 * (d * 8.0 + rel * 3.0).sin().abs();
-                    asphalt.lerp(f(neon), streak * pulse * broken * 0.32 * (1.0 - fog))
+                    asphalt.lerp(neon, streak * pulse * broken * 0.32 * (1.0 - fog))
                 } else {
                     asphalt
                 }
@@ -289,7 +290,7 @@ fn draw_road_row(fb: &mut FrameBuf, y: usize, cx: f32, scale: f32, d: f32, span:
             let bevel = ((a - ROAD_HALF) / 0.9 * 3.0).floor() / 3.0;
             rumble.scale(1.06 - bevel * 0.18)
         } else if midnight {
-            let seam = rel.rem_euclid(2.0) < 0.05 || d.rem_euclid(4.0) < 0.06;
+            let seam = pavement_cross_seam || rel.rem_euclid(2.0) < 0.05;
             let curb = a < ROAD_HALF + 1.2;
             let tile = if curb { Rgb(72, 85, 108) } else if seam { Rgb(13, 17, 30) } else { pal.grass[stripe] };
             f(tile)
@@ -390,7 +391,11 @@ fn draw_sprite(fb: &mut FrameBuf, s: &SpriteInst, cx: f32, base: f32, wpx: f32, 
             if let Some(sample_count) = std::num::NonZeroU32::new(hits) {
                 let c = Rgb((r / sample_count) as u8, (g / sample_count) as u8, (b / sample_count) as u8).scale(light).lerp(fogc, fog);
                 let alpha = hits as f32 / (ns * ns) as f32 * row_clip;
-                fb.blend(px, py, c, alpha);
+                if alpha == 1.0 {
+                    fb.set(px, py, c);
+                } else {
+                    fb.blend(px, py, c, alpha);
+                }
             }
         }
     }
@@ -451,17 +456,28 @@ fn draw_clouds(frame: &mut FrameBuf, view: &View, cloud: Rgb, scroll: f32, time:
 }
 
 fn draw_halo(frame: &mut FrameBuf, center: (f32, f32), radius: f32, aspect: f32, color: Rgb, strength: f32) {
+    let bottom = frame.h;
+    draw_halo_clipped(frame, center, radius, aspect, color, strength, bottom);
+}
+
+fn draw_halo_clipped(frame: &mut FrameBuf, center: (f32, f32), radius: f32, aspect: f32, color: Rgb, strength: f32, clip_y: usize) {
     let horizontal_radius = radius / aspect;
     let left = (center.0 - horizontal_radius * 3.0).floor().max(0.0) as usize;
     let right = (center.0 + horizontal_radius * 3.0).ceil().min(frame.w as f32).max(0.0) as usize;
     let top = (center.1 - radius * 3.0).floor().max(0.0) as usize;
-    let bottom = (center.1 + radius * 3.0).ceil().min(frame.h as f32).max(0.0) as usize;
+    let bottom = ((center.1 + radius * 3.0).ceil().min(frame.h as f32).max(0.0) as usize).min(clip_y);
+    if left >= right || top >= bottom {
+        return;
+    }
+    let horizontal_weights: Vec<f32> = (left..right).map(|pixel_x| {
+        let horizontal = (pixel_x as f32 + 0.5 - center.0) / horizontal_radius;
+        (-horizontal * horizontal * 0.5).exp()
+    }).collect();
     for pixel_y in top..bottom {
-        for pixel_x in left..right {
-            let horizontal = (pixel_x as f32 + 0.5 - center.0) / horizontal_radius;
-            let vertical = (pixel_y as f32 + 0.5 - center.1) / radius;
-            let opacity = (-(horizontal * horizontal + vertical * vertical) * 0.5).exp() * strength;
-            frame.blend(pixel_x as i32, pixel_y as i32, color, opacity);
+        let vertical = (pixel_y as f32 + 0.5 - center.1) / radius;
+        let vertical_weight = (-vertical * vertical * 0.5).exp() * strength;
+        for (pixel, horizontal_weight) in frame.row_mut(pixel_y)[left..right].iter_mut().zip(&horizontal_weights) {
+            *pixel = pixel.lerp(color, horizontal_weight * vertical_weight);
         }
     }
 }
@@ -997,6 +1013,96 @@ mod tests {
     use crate::race::Race;
     use crate::track::all_tracks;
     use std::rc::Rc;
+
+    #[test]
+    fn separable_halos_preserve_pixels_and_respect_clipping() {
+        let background = Rgb(17, 39, 81);
+        let color = Rgb(235, 65, 115);
+        for (width, height, aspect) in [(96, 54, 1.0), (120, 80, 0.5), (160, 90, 2.0), (800, 448, 1.0)] {
+            for center in [(-1000.0, 30.0), (1000.0, 30.0), (40.3, -1000.0), (40.3, 1000.0), (40.3, 30.7)] {
+                let radius = height as f32 * 0.3;
+                let horizontal_radius = radius / aspect;
+                let mut reference = FrameBuf::new();
+                reference.resize(width, height);
+                for pixel_y in 0..height {
+                    reference.row_mut(pixel_y).fill(background);
+                }
+                let left = (center.0 - horizontal_radius * 3.0).floor().max(0.0) as usize;
+                let right = (center.0 + horizontal_radius * 3.0).ceil().min(width as f32).max(0.0) as usize;
+                let top = (center.1 - radius * 3.0).floor().max(0.0) as usize;
+                let bottom = (center.1 + radius * 3.0).ceil().min(height as f32).max(0.0) as usize;
+                for pixel_y in top..bottom {
+                    for pixel_x in left..right {
+                        let horizontal = (pixel_x as f32 + 0.5 - center.0) / horizontal_radius;
+                        let vertical = (pixel_y as f32 + 0.5 - center.1) / radius;
+                        let opacity = (-(horizontal * horizontal + vertical * vertical) * 0.5).exp() * 0.18;
+                        reference.blend(pixel_x as i32, pixel_y as i32, color, opacity);
+                    }
+                }
+                for clip_y in [0, height / 2, height, height + 10] {
+                    let mut actual = FrameBuf::new();
+                    actual.resize(width, height);
+                    for pixel_y in 0..height {
+                        actual.row_mut(pixel_y).fill(background);
+                    }
+                    if clip_y == height {
+                        draw_halo(&mut actual, center, radius, aspect, color, 0.18);
+                    } else {
+                        draw_halo_clipped(&mut actual, center, radius, aspect, color, 0.18, clip_y);
+                    }
+                    for pixel_y in 0..height {
+                        for pixel_x in 0..width {
+                            let actual = actual.get(pixel_x, pixel_y);
+                            if pixel_y >= clip_y {
+                                assert_eq!(actual, background);
+                            } else {
+                                let expected = reference.get(pixel_x, pixel_y);
+                                assert!(actual.0.abs_diff(expected.0) <= 1 && actual.1.abs_diff(expected.1) <= 1 && actual.2.abs_diff(expected.2) <= 1,
+                                    "halo changed at ({pixel_x}, {pixel_y}): {actual:?} != {expected:?}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "reports renderer timings; run with --release --ignored --nocapture"]
+    fn track_render_timings() {
+        use std::{hint::black_box, time::Instant};
+
+        let mut frame = FrameBuf::new();
+        frame.resize(800, 448);
+        let view = View { w: frame.w, h: frame.h, hz: frame.h as f32 * HORIZON, focal_y: frame.w as f32 * 0.4, aspect: 1.0 };
+        for track in all_tracks().into_iter().filter(|track| !track.classic) {
+            let mut race = Race::new(Rc::new(track), 3, false, true);
+            race.rivals.clear();
+            let mut sprites = Vec::new();
+            let mut elapsed = [std::time::Duration::ZERO; 3];
+            for (distance, background) in [(80.0, 0.0), (530.0, 0.13), (1700.0, 0.3), (2680.0, -0.2)] {
+                race.d = distance;
+                race.sprites(&mut sprites);
+                let camera = Camera { d: race.cam_d(), x: 0.0, bg: background };
+                for _ in 0..20 {
+                    let start = Instant::now();
+                    draw_backdrop(&mut frame, &view, &race.track.palette, background, 12.0);
+                    black_box(&frame);
+                    elapsed[0] += start.elapsed();
+                    let start = Instant::now();
+                    render_world(&mut frame, &race.track, &camera, &mut [], 12.0, 1.0);
+                    black_box(&frame);
+                    elapsed[1] += start.elapsed();
+                    let start = Instant::now();
+                    render_world(&mut frame, &race.track, &camera, &mut sprites, 12.0, 1.0);
+                    black_box(&frame);
+                    elapsed[2] += start.elapsed();
+                }
+            }
+            eprintln!("{}: backdrop={:.3}ms, world_without_sprites={:.3}ms, full_world={:.3}ms", race.track.name,
+                elapsed[0].as_secs_f64() * 1000.0 / 80.0, elapsed[1].as_secs_f64() * 1000.0 / 80.0, elapsed[2].as_secs_f64() * 1000.0 / 80.0);
+        }
+    }
 
     #[test]
     fn steering_yaw_points_the_nose_in_the_input_direction() {

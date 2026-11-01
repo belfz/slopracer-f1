@@ -66,6 +66,18 @@ the game or use production credentials. On Linux, install `libasound2-dev`,
 `libudev-dev`, and `pkg-config` before you run the native checks. The terminal
 cleanup test requires a Unix pseudo-terminal and the debug binary built above.
 
+To compare track rendering costs, run:
+
+```sh
+cargo test --release --locked track_render_timings -- --ignored --nocapture
+```
+
+This measures the three selectable tracks at 800×448 across four fixed camera
+positions. It reports average backdrop, world-without-sprites, and full-world
+times. The full-world time includes the backdrop and scenery. These are CPU
+rendering times, not displayed frame rates; they exclude audio, the HUD, and
+browser or terminal output. Run it without other tests for consistent results.
+
 For a real-browser audio stress test, install Playwright in your test environment
 and run `node --test tests/browser-audio.mjs`. You can set `PLAYWRIGHT_MODULE` to
 the absolute path of its JavaScript entry point and `CHROME_EXECUTABLE` to an
