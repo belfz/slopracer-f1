@@ -387,8 +387,8 @@ fn draw_sprite(fb: &mut FrameBuf, s: &SpriteInst, cx: f32, base: f32, wpx: f32, 
                     }
                 }
             }
-            if hits > 0 {
-                let c = Rgb((r / hits) as u8, (g / hits) as u8, (b / hits) as u8).scale(light).lerp(fogc, fog);
+            if let Some(sample_count) = std::num::NonZeroU32::new(hits) {
+                let c = Rgb((r / sample_count) as u8, (g / sample_count) as u8, (b / sample_count) as u8).scale(light).lerp(fogc, fog);
                 let alpha = hits as f32 / (ns * ns) as f32 * row_clip;
                 fb.blend(px, py, c, alpha);
             }
