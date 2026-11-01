@@ -64,6 +64,7 @@ pub struct Race {
     pub laps: u32,
     pub demo: bool,
     pub auto_gear: bool,
+    pub car_color: Rgb,
 
     pub d: f32,
     pub x: f32,
@@ -98,7 +99,8 @@ pub struct Race {
 fn rival_color(team: Rgb, player: Rgb) -> Rgb {
     let d = |a: u8, b: u8| (a as i32 - b as i32).abs();
     if d(team.0, player.0) + d(team.1, player.1) + d(team.2, player.2) < 120 {
-        Rgb(225, 25, 35)
+        let red = Rgb(225, 25, 35);
+        if d(red.0, player.0) + d(red.1, player.1) + d(red.2, player.2) < 120 { Rgb(235, 235, 235) } else { red }
     } else {
         team
     }
@@ -108,6 +110,21 @@ fn grid_slot(k: usize) -> (f32, f32) {
     let d = -5.0 - (k / 2) as f32 * 12.0 - (k % 2) as f32 * 6.0;
     let x = if k.is_multiple_of(2) { -2.2 } else { 2.2 };
     (d, x)
+}
+
+fn sweep_interval(start: f32, end: f32, lower: f32, upper: f32) -> Option<(f32, f32)> {
+    if lower > upper {
+        return None;
+    }
+    let movement = end - start;
+    if movement == 0.0 {
+        return (start >= lower && start <= upper).then_some((0.0, 1.0));
+    }
+    let first = (lower - start) / movement;
+    let last = (upper - start) / movement;
+    let enter = first.min(last).max(0.0);
+    let leave = first.max(last).min(1.0);
+    (enter <= leave).then_some((enter, leave))
 }
 
 impl Race {
@@ -133,11 +150,13 @@ impl Race {
         } else {
             Phase::Countdown { t: 0.0, lights: 0, go_at: 5.0 + rng.gen_range(0.4..1.5) }
         };
+        let car_color = track.palette.car;
         Race {
             track,
             laps,
             demo,
             auto_gear,
+            car_color,
             d,
             x,
             v: 0.0,
@@ -257,9 +276,10 @@ impl Race {
 
         let ctl = if self.demo || self.finished_for().is_some() { self.ai_controls() } else { ctl };
         if moving {
+            let previous = (self.d, self.x);
             self.update_player(dt, ctl);
             self.update_rivals(dt);
-            self.collisions();
+            self.collisions(previous);
             if !self.demo {
                 self.check_laps();
             }
@@ -323,7 +343,7 @@ impl Race {
         let c_ahead = self.track.curve_at(self.d + 30.0);
         let c_now = self.track.curve_at(self.d);
         let finished = self.finished_for().is_some();
-        let target_v = if finished { 35.0 } else { 78.0 * (1.0 - c_ahead.abs() * 20.0).max(0.55) };
+        let mut target_v = if finished { 35.0 } else { 78.0 * (1.0 - c_ahead.abs() * 20.0).max(0.55) };
 
         // Pick a lane free of slower traffic.
         let blocked = |lane: f32, me: &Race| {
@@ -340,6 +360,17 @@ impl Race {
         if finished {
             self.ai_x = 0.0;
         }
+        if self.demo {
+            for rival in &self.rivals {
+                let gap = self.wrap(rival.d - self.d);
+                let in_path = (rival.x - self.x).abs() < CAR_HALF_W * 2.0 + 0.5
+                    || (rival.x - self.ai_x).abs() < CAR_HALF_W * 2.0 + 0.5;
+                if gap > 0.0 && gap < 45.0 && in_path {
+                    let following_distance = CAR_LEN + 3.0 + self.v * 0.45;
+                    target_v = target_v.min((rival.v + (gap - following_distance) * 0.8).max(0.0));
+                }
+            }
+        }
 
         let grip = (self.v / 25.0).clamp(0.2, 1.0);
         let ff = c_now * self.v * self.v * CENTRIFUGAL / (STEER_SPEED * grip);
@@ -347,7 +378,7 @@ impl Race {
         Controls {
             steer: (ff + fb).clamp(-1.0, 1.0),
             accel: self.v < target_v,
-            brake: self.v > target_v + 8.0,
+            brake: self.v > target_v + if self.demo { 1.5 } else { 8.0 },
         }
     }
 
@@ -422,7 +453,7 @@ impl Race {
         }
     }
 
-    fn collisions(&mut self) {
+    fn collisions(&mut self, previous: (f32, f32)) {
         if self.spin > 0.0 {
             return;
         }
@@ -455,19 +486,33 @@ impl Race {
             r.x += push;
         }
 
-        if !crash && self.grace <= 0.0 && self.x.abs() > ROAD_HALF + 1.0 {
-            let track = self.track.clone();
-            for s in &track.scenery {
-                let dz = self.wrap(s.d - self.d);
-                if dz.abs() > 1.2 {
-                    continue;
+        if !crash && self.grace <= 0.0 && previous.1.abs().max(self.x.abs()) > ROAD_HALF + 1.0 {
+            let mut impact: Option<f32> = None;
+            for scenery in &self.track.scenery {
+                let distance = previous.0 + self.wrap(scenery.d - previous.0);
+                let Some((enter_d, leave_d)) = sweep_interval(previous.0, self.d, distance - 1.2, distance + 1.2) else { continue };
+                for &(offset, half_width) in scenery.kind.solid() {
+                    let center = scenery.x + offset;
+                    let lower = center - half_width - CAR_HALF_W;
+                    let upper = center + half_width + CAR_HALF_W;
+                    let (lower, upper) = if center >= 0.0 {
+                        (lower.max(ROAD_HALF + 1.0), upper)
+                    } else {
+                        (lower, upper.min(-ROAD_HALF - 1.0))
+                    };
+                    let Some((enter_x, leave_x)) = sweep_interval(previous.1, self.x, lower, upper) else { continue };
+                    let enter = enter_d.max(enter_x);
+                    if enter <= leave_d.min(leave_x) {
+                        impact = Some(impact.map_or(enter, |earlier| earlier.min(enter)));
+                    }
                 }
-                if s.kind.solid().iter().any(|&(off, hw)| (s.x + off - self.x).abs() < hw + CAR_HALF_W) {
-                    crash = true;
-                    self.v *= 0.1;
-                    self.recover_x = Some(self.x.signum() * (ROAD_HALF - 1.0));
-                    break;
-                }
+            }
+            if let Some(time) = impact {
+                self.d = previous.0 + (self.d - previous.0) * time;
+                self.x = previous.1 + (self.x - previous.1) * time;
+                crash = true;
+                self.v *= 0.1;
+                self.recover_x = Some(self.x.signum() * (ROAD_HALF - 1.0));
             }
         }
 
@@ -505,6 +550,13 @@ impl Race {
             } else {
                 self.message(format!("LAP {l}"), 1.5);
             }
+        }
+    }
+
+    pub fn set_player_color(&mut self, color: Rgb) {
+        self.car_color = color;
+        for (rival, team) in self.rivals.iter_mut().zip(TEAM_COLORS) {
+            rival.color = rival_color(team, color);
         }
     }
 
@@ -567,7 +619,7 @@ impl Race {
             x: self.x,
             width_m,
             bmp,
-            body: self.track.palette.car,
+            body: self.car_color,
             flip,
             skew: (self.steer_vis * 2.0).round() as i32,
             lift: if bumpy { ((self.time * 25.0) as i32 % 2) as f32 * 0.06 } else { 0.0 },
@@ -580,6 +632,113 @@ impl Race {
 mod tests {
     use super::*;
     use crate::track::all_tracks;
+
+    #[test]
+    fn chosen_paint_keeps_the_player_distinct_from_rivals() {
+        let mut race = Race::new(Rc::new(all_tracks().remove(3)), 3, true, false);
+        let original_track_color = race.track.palette.car;
+        for color in crate::settings::CarColor::ALL {
+            race.set_player_color(color.rgb());
+            assert_eq!(race.car_color, color.rgb());
+            assert_eq!(race.track.palette.car, original_track_color);
+            for rival in &race.rivals {
+                let distance = (rival.color.0 as i32 - race.car_color.0 as i32).abs()
+                    + (rival.color.1 as i32 - race.car_color.1 as i32).abs()
+                    + (rival.color.2 as i32 - race.car_color.2 as i32).abs();
+                assert!(distance >= 120, "{} is too close to {:?}", color.label(), rival.color);
+            }
+        }
+    }
+
+    #[test]
+    fn menu_demo_keeps_a_safe_gap_through_the_opening_grid() {
+        for track in all_tracks() {
+            let track = Rc::new(track);
+            for frames_per_second in [20, 60, 120] {
+                for seed in [3, 42, 79] {
+                    let mut race = Race::new(track.clone(), 99, true, true);
+                    race.rng = StdRng::seed_from_u64(seed);
+                    for (index, rival) in race.rivals.iter_mut().enumerate() {
+                        rival.top = 84.0 - index as f32 * 1.5 + race.rng.gen_range(-1.0..1.0);
+                        rival.lane_timer = race.rng.gen_range(3.0..8.0);
+                    }
+                    for _ in 0..frames_per_second * 12 {
+                        race.update(1.0 / frames_per_second as f32, Controls::default());
+                        assert!(
+                            !race.sfx.drain(..).any(|sound| matches!(sound, Sfx::Bump | Sfx::Crash)),
+                            "{} at {frames_per_second} FPS, seed {seed}: menu camera jolted at {:.2}s", track.name, race.time
+                        );
+                    }
+                    assert!(race.v > 20.0, "{}: demo should keep moving", track.name);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn player_races_still_apply_car_collisions() {
+        let mut race = Race::new(Rc::new(all_tracks().remove(3)), 3, true, false);
+        race.phase = Phase::Racing;
+        race.d = 160.0;
+        race.x = 0.0;
+        race.v = 40.0;
+        race.rivals.truncate(1);
+        race.rivals[0].d = race.d + 3.0;
+        race.rivals[0].x = race.x;
+        race.rivals[0].v = 20.0;
+        race.collisions((race.d, race.x));
+        assert!(race.spin > 0.0);
+        assert!(race.d < 160.0);
+        assert_eq!(race.v, 6.0);
+        assert!(race.sfx.iter().any(|sound| matches!(sound, Sfx::Crash)));
+    }
+
+    #[test]
+    fn scenery_collisions_follow_the_movement_path() {
+        for distance in [100.0, 0.0] {
+            for frames_per_second in [20, 30, 60, 120] {
+                let mut track = all_tracks().remove(3);
+                track.scenery = vec![crate::track::Scenery { d: distance, x: 7.0, kind: crate::track::Prop::Tree }];
+                let mut race = Race::new(Rc::new(track), 3, true, false);
+                race.phase = Phase::Racing;
+                race.rivals.clear();
+                race.d = distance - 1.5;
+                race.x = 7.0;
+                race.v = 80.0;
+                for _ in 0..frames_per_second / 10 {
+                    race.update(1.0 / frames_per_second as f32, Controls { accel: true, ..Controls::default() });
+                }
+                assert!(race.sfx.iter().any(|sound| matches!(sound, Sfx::Crash)), "{frames_per_second} FPS at {distance}m");
+            }
+        }
+    }
+
+    #[test]
+    fn scenery_collisions_require_simultaneous_overlap_and_choose_the_first_hit() {
+        for (start_x, end_x, end_d, expected_crash) in [
+            (4.0, 4.0, 102.0, false),
+            (7.0, 1.0, 102.0, false),
+            (4.0, 7.0, 102.0, true),
+            (7.0, 7.0, 97.0, false),
+            (7.0, 7.0, 102.0, true),
+        ] {
+            let mut track = all_tracks().remove(3);
+            track.scenery = vec![
+                crate::track::Scenery { d: 101.0, x: 7.0, kind: crate::track::Prop::Tree },
+                crate::track::Scenery { d: 100.0, x: 7.0, kind: crate::track::Prop::Tree },
+            ];
+            let mut race = Race::new(Rc::new(track), 3, true, false);
+            race.rivals.clear();
+            race.d = end_d;
+            race.x = end_x;
+            race.v = 80.0;
+            race.collisions((98.0, start_x));
+            assert_eq!(race.spin > 0.0, expected_crash, "path ({start_x}, {end_x}, {end_d})");
+            if start_x == 7.0 && end_x == 7.0 && expected_crash {
+                assert!((race.d - 98.8).abs() < 0.001);
+            }
+        }
+    }
 
     #[test]
     fn crashing_into_scenery_can_be_recovered_from() {

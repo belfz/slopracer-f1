@@ -22,7 +22,6 @@ flate2 = "1"
 base64 = "0.22"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-cpal = { version = "0.15", features = ["wasm-bindgen"] }
 getrandom = { version = "0.2", features = ["js"] }
 wasm-bindgen = "0.2"
 console_error_panic_hook = "0.1"

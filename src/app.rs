@@ -21,21 +21,21 @@ pub enum Screen {
 #[derive(Clone, Copy, PartialEq)]
 pub enum MenuItem {
     Track,
+    CarColor,
     Gearbox,
     Laps,
     #[cfg(not(target_arch = "wasm32"))]
     Graphics,
-    Classics,
     Start,
 }
 
 const MENU: &[MenuItem] = &[
     MenuItem::Track,
+    MenuItem::CarColor,
     MenuItem::Gearbox,
     MenuItem::Laps,
     #[cfg(not(target_arch = "wasm32"))]
     MenuItem::Graphics,
-    MenuItem::Classics,
     MenuItem::Start,
 ];
 
@@ -70,7 +70,8 @@ impl App {
         let settings = Settings::load();
         // Open on the synthwave track; it's the showpiece.
         let track_idx = tracks.iter().position(|t| t.name == "Neon Sakura").unwrap_or(0);
-        let demo = Race::new(tracks[track_idx].clone(), 99, true, true);
+        let mut demo = Race::new(tracks[track_idx].clone(), 99, true, true);
+        demo.set_player_color(settings.car_color.rgb());
         App {
             tracks,
             screen: if intro { Screen::Boot } else { Screen::Menu },
@@ -107,24 +108,8 @@ impl App {
         self.mode = modes[(i + dir).rem_euclid(modes.len() as i32) as usize];
     }
 
-    /// Indices of the tracks shown in the menu: classic tracks stay hidden
-    /// until unlocked in the settings.
     pub fn visible_tracks(&self) -> Vec<usize> {
-        (0..self.tracks.len()).filter(|&i| self.settings.classic_tracks || !self.tracks[i].classic).collect()
-    }
-
-    pub fn locked_tracks(&self) -> usize {
-        self.tracks.len() - self.visible_tracks().len()
-    }
-
-    fn toggle_classics(&mut self) {
-        self.settings.classic_tracks = !self.settings.classic_tracks;
-        self.settings.save();
-        let visible = self.visible_tracks();
-        if !visible.contains(&self.track_idx) {
-            self.track_idx = visible[0];
-            self.restart_demo();
-        }
+        (0..self.tracks.len()).filter(|&index| !self.tracks[index].classic).collect()
     }
 
     fn finish_boot(&mut self) {
@@ -134,11 +119,14 @@ impl App {
 
     fn restart_demo(&mut self) {
         self.demo = Race::new(self.tracks[self.track_idx].clone(), 99, true, true);
+        self.demo.set_player_color(self.settings.car_color.rgb());
     }
 
     fn start_race(&mut self) {
         self.audio.play(Sfx::Select);
-        self.race = Some(Race::new(self.tracks[self.track_idx].clone(), self.laps, self.auto_gear, false));
+        let mut race = Race::new(self.tracks[self.track_idx].clone(), self.laps, self.auto_gear, false);
+        race.set_player_color(self.settings.car_color.rgb());
+        self.race = Some(race);
         self.screen = Screen::Race;
         self.paused = false;
         self.keys.clear();
@@ -152,9 +140,7 @@ impl App {
     }
 
     pub fn on_key(&mut self, k: KeyEvent, now: Instant) {
-        if let Some(b) = Btn::from_key(k.key) {
-            self.keys.event(b, k.kind, now);
-        }
+        self.keys.event(k.key, k.kind, now);
         if k.kind == KeyKind::Release {
             return;
         }
@@ -253,10 +239,14 @@ impl App {
                         self.restart_demo();
                     }
                     MenuItem::Gearbox => self.auto_gear = !self.auto_gear,
+                    MenuItem::CarColor => {
+                        self.settings.car_color = self.settings.car_color.cycle(dir);
+                        self.demo.set_player_color(self.settings.car_color.rgb());
+                        self.settings.save();
+                    }
                     MenuItem::Laps => self.laps = (self.laps as i32 + dir).clamp(1, 9) as u32,
                     #[cfg(not(target_arch = "wasm32"))]
                     MenuItem::Graphics => self.cycle_mode(dir),
-                    MenuItem::Classics => self.toggle_classics(),
                     MenuItem::Start => return,
                 }
                 self.audio.play(Sfx::Blip);
@@ -353,6 +343,47 @@ impl App {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
+    use crate::settings::CarColor;
+
+    #[test]
+    fn track_picker_only_cycles_available_tracks() {
+        let mut app = App::new(true, true, true, Mode::Pixels, true, false);
+        assert_eq!(app.tracks.len(), 6);
+        assert_eq!(app.visible_tracks().iter().map(|&index| app.tracks[index].name).collect::<Vec<_>>(), ["Neon Sakura", "Shirayuki Pass", "Tokyo Midnight"]);
+        app.menu_item = MenuItem::Track;
+        let first = app.track_idx;
+        for key in [Key::Right, Key::Right, Key::Right, Key::Left, Key::Left, Key::Left] {
+            let previous = app.track_idx;
+            app.menu_key(key);
+            assert_ne!(app.track_idx, previous);
+            assert!(!app.tracks[app.track_idx].classic);
+        }
+        assert_eq!(app.track_idx, first);
+    }
+
+    #[test]
+    fn chosen_color_survives_track_changes_and_race_restarts() {
+        let mut app = App::new(true, true, true, Mode::Pixels, true, false);
+        let mut sprites = Vec::new();
+        for color in CarColor::ALL {
+            app.settings.car_color = color;
+            for track_index in app.visible_tracks() {
+                app.track_idx = track_index;
+                app.restart_demo();
+                app.demo.sprites(&mut sprites);
+                assert_eq!(sprites.last().unwrap().body, color.rgb());
+                app.start_race();
+                app.paused = true;
+                app.race_key(Key::Char('r'));
+                let race = app.race.as_ref().unwrap();
+                assert_eq!(race.car_color, color.rgb());
+                race.sprites(&mut sprites);
+                assert_eq!(sprites.last().unwrap().body, color.rgb());
+                app.back_to_menu();
+                assert_eq!(app.demo.car_color, color.rgb());
+            }
+        }
+    }
 
     #[test]
     fn automatic_gearbox_is_the_default_in_every_graphics_mode() {

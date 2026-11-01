@@ -23,6 +23,7 @@ pub struct Segment {
 pub enum Backdrop {
     Mountains { snow: bool },
     City,
+    Midnight,
     /// Retro striped sun, neon wireframe mountains and a Tokyo skyline.
     Synth,
     /// Low winter sun, a snow-capped volcano and a pastel town with a
@@ -81,6 +82,7 @@ pub enum Prop {
     RoadSign { text: u8 },
     Snowman,
     SnowPole,
+    CityBuilding { variant: u8, color: Rgb },
 }
 
 impl Prop {
@@ -111,6 +113,7 @@ impl Prop {
             Prop::RoadSign { text } => &s.road_signs[text as usize],
             Prop::Snowman => &s.snowman,
             Prop::SnowPole => &s.snow_pole,
+            Prop::CityBuilding { variant, .. } => &s.city_buildings[variant as usize],
         }
     }
 
@@ -141,6 +144,7 @@ impl Prop {
             Prop::RoadSign { .. } => 9.0,
             Prop::Snowman => 1.3,
             Prop::SnowPole => 0.8,
+            Prop::CityBuilding { .. } => 14.0,
         }
     }
 
@@ -163,6 +167,7 @@ impl Prop {
             Prop::Torii | Prop::SnowTorii => &[(-7.9, 0.7), (7.9, 0.7)],
             Prop::Gantry => &[(-8.7, 0.4), (8.7, 0.4)],
             Prop::Bush | Prop::Grandstand => &[],
+            Prop::CityBuilding { .. } => &[(0.0, 6.5)],
         }
     }
 
@@ -175,7 +180,8 @@ impl Prop {
             Prop::Billboard { color, .. }
             | Prop::NeonSign { color, .. }
             | Prop::NeonBoard { color, .. }
-            | Prop::Vending { color } => color,
+            | Prop::Vending { color }
+            | Prop::CityBuilding { color, .. } => color,
             Prop::NeonChevron { .. } => Rgb(40, 230, 255),
             _ => Rgb(255, 255, 255),
         }
@@ -200,7 +206,7 @@ pub struct Track {
     pub scenery: Vec<Scenery>,
     /// Soundtrack exclusive to this track, if any.
     pub music: Option<Tune>,
-    /// One of the original tracks, hidden until unlocked in the settings.
+    /// One of the original tracks, hidden from the menu.
     pub classic: bool,
 }
 
@@ -211,6 +217,7 @@ enum Style {
     Night,
     Synth,
     Winter,
+    Midnight,
 }
 
 impl Track {
@@ -235,11 +242,12 @@ impl Track {
         let music = match style {
             Style::Synth => Some(Tune::NeonSakura),
             Style::Winter => Some(Tune::Shirayuki),
+            Style::Midnight => Some(Tune::TokyoMidnight),
             _ => None,
         };
         let classic = music.is_none();
         let mut t = Track { name, desc, palette, segments, starts, base_heights, length: acc, minimap: TrackMap::default(), scenery: Vec::new(), music, classic };
-        t.minimap = TrackMap::from_track(&t);
+        t.minimap = if matches!(style, Style::Midnight) { TrackMap::from_closed_track(&t) } else { TrackMap::from_track(&t) };
         t.generate_scenery(style, seed);
         t
     }
@@ -279,6 +287,10 @@ impl Track {
     }
 
     fn generate_scenery(&mut self, style: Style, seed: u64) {
+        if matches!(style, Style::Midnight) {
+            self.generate_midnight_scenery(seed);
+            return;
+        }
         let mut rng = StdRng::seed_from_u64(seed);
         let winter = matches!(style, Style::Winter);
         let ads = if winter {
@@ -428,7 +440,7 @@ impl Track {
                         Style::Mountain if r < 0.85 => Prop::Rock,
                         Style::Mountain => Prop::Bush,
                         Style::Night if r < 0.5 => Prop::Tree,
-                        Style::Night | Style::Synth | Style::Winter => Prop::Bush,
+                        Style::Night | Style::Synth | Style::Winter | Style::Midnight => Prop::Bush,
                     };
                     let x = side * (ROAD_HALF + rng.gen_range(3.5..14.0));
                     out.push(Scenery { d, x, kind });
@@ -441,6 +453,64 @@ impl Track {
             d += rng.gen_range(10.0..24.0);
         }
         out.sort_by(|a, b| a.d.partial_cmp(&b.d).unwrap());
+        self.scenery = out;
+    }
+
+    fn generate_midnight_scenery(&mut self, seed: u64) {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let neon = [Rgb(255, 65, 176), Rgb(55, 222, 255), Rgb(164, 110, 255), Rgb(255, 180, 90)];
+        let mut out = vec![Scenery { d: 0.0, x: 0.0, kind: Prop::Gantry }];
+        let mut distance = 0.0;
+        let mut block = 0usize;
+        while distance < self.length {
+            let shrine = (1620.0..1920.0).contains(&distance);
+            for (side_index, side) in [-1.0, 1.0].into_iter().enumerate() {
+                let color = neon[(block + side_index) % neon.len()];
+                let variant = if shrine { 3 } else { rng.gen_range(0..3) };
+                out.push(Scenery {
+                    d: distance,
+                    x: side * (ROAD_HALF + 14.0 + rng.gen_range(0.0..3.0)),
+                    kind: Prop::CityBuilding { variant, color },
+                });
+                if block.is_multiple_of(2) {
+                    out.push(Scenery { d: distance + 5.0, x: side * (ROAD_HALF + 2.8), kind: Prop::Lamp });
+                    out.push(Scenery {
+                        d: distance + 12.0,
+                        x: side * (ROAD_HALF + 7.0),
+                        kind: Prop::NeonSign { text: ((block / 2 + side_index) % NEON_TEXT.len()) as u8, color },
+                    });
+                }
+                if shrine {
+                    out.push(Scenery { d: distance + 16.0, x: side * (ROAD_HALF + 3.0), kind: Prop::Lantern });
+                    if block.is_multiple_of(2) {
+                        out.push(Scenery { d: distance + 20.0, x: side * (ROAD_HALF + 8.0), kind: Prop::Sakura });
+                    }
+                } else if block.is_multiple_of(5) {
+                    out.push(Scenery { d: distance + 18.0, x: side * (ROAD_HALF + 4.8), kind: Prop::Vending { color } });
+                }
+            }
+            let curve = self.curve_at(distance + 12.0);
+            if curve.abs() > 0.003 {
+                let outer = if curve > 0.0 { -1.0 } else { 1.0 };
+                out.push(Scenery { d: distance + 12.0, x: outer * (ROAD_HALF + 1.7), kind: Prop::NeonChevron { left: curve < 0.0 } });
+            }
+            if block % 9 == 4 {
+                out.push(Scenery {
+                    d: distance + 8.0,
+                    x: (if block.is_multiple_of(2) { 1.0 } else { -1.0 }) * (ROAD_HALF + 8.0),
+                    kind: Prop::NeonBoard { text: (block % NEON_TEXT.len()) as u8, color: neon[block % neon.len()] },
+                });
+            }
+            distance += 32.0;
+            block += 1;
+        }
+        for distance in [1670.0, 1740.0, 1810.0] {
+            out.push(Scenery { d: distance, x: 0.0, kind: Prop::Torii });
+        }
+        for object in &mut out {
+            object.d = object.d.rem_euclid(self.length);
+        }
+        out.sort_by(|first, second| first.d.total_cmp(&second.d));
         self.scenery = out;
     }
 }
@@ -539,6 +609,25 @@ pub fn all_tracks() -> Vec<Track> {
         snow: true,
     };
 
+    let midnight = Palette {
+        sky: [Rgb(3, 5, 20), Rgb(12, 13, 40), Rgb(52, 28, 78)],
+        clouds: None,
+        far_hills: Rgb(22, 24, 48),
+        near_hills: Rgb(12, 16, 30),
+        backdrop: Backdrop::Midnight,
+        grass: [Rgb(21, 23, 40), Rgb(24, 26, 44)],
+        grid: None,
+        road: [Rgb(34, 39, 58), Rgb(30, 34, 50)],
+        rumble: [Rgb(235, 55, 155), Rgb(42, 200, 235)],
+        lane: Rgb(174, 218, 238),
+        fog: Rgb(35, 28, 66),
+        light: 0.86,
+        stars: true,
+        sun: Some(Rgb(202, 225, 245)),
+        car: Rgb(150, 64, 255),
+        snow: false,
+    };
+
     vec![
         Track::build(
             "Danube Ring",
@@ -604,5 +693,87 @@ pub fn all_tracks() -> Vec<Track> {
             Style::Winter,
             5,
         ),
+        Track::build(
+            "Tokyo Midnight",
+            "22 turns through neon boulevards, hairpins and a winding infield",
+            midnight,
+            &[
+                (80.5752, 0.0, 0.0), (194.6673, 0.0095, 0.0), (298.1802, 0.0, 0.0),
+                (72.8642, 0.006, 0.0), (199.6787, 0.0, 0.0), (117.8097, 0.010, 0.0),
+                (57.9045, 0.0, 0.0), (117.8097, 0.010, 0.0), (178.2886, 0.0, 4.0),
+                (168.2996, 0.014, 4.0), (11.4849, 0.0, 0.0), (168.2996, 0.014, 0.0),
+                (11.4849, 0.0, 0.0), (168.2996, -0.014, 0.0), (11.4849, 0.0, 0.0),
+                (168.2996, -0.014, 0.0), (182.6074, 0.0, -4.0), (234.5329, -0.009, -4.0),
+                (306.9111, 0.0, 5.0), (117.8097, 0.010, 0.0), (57.9045, 0.0, 0.0),
+                (117.8097, 0.010, 0.0), (249.4477, 0.0, 0.0), (190.8997, 0.012, 0.0),
+                (82.6440, 0.0, -5.0), (168.2996, 0.014, 0.0), (53.9849, 0.0, 0.0),
+                (168.2996, -0.014, 0.0), (11.4849, 0.0, 0.0), (168.2996, -0.014, 0.0),
+                (202.6477, 0.0, 0.0), (202.7997, 0.011, 0.0), (156.9514, 0.0, 0.0),
+                (117.8097, 0.010, 0.0), (57.9045, 0.0, 0.0), (117.8097, 0.010, 0.0),
+                (245.8641, 0.0, 0.0), (196.591, -0.0115, 0.0), (36.5604, 0.0, 0.0),
+                (168.2996, 0.014, 0.0), (84.5582, 0.0, 0.0), (132.4707, 0.0105, 0.0),
+                (72.6314, 0.0, 0.0), (132.4707, -0.0105, 0.0), (80.5752, 0.0, 0.0),
+            ],
+            Style::Midnight,
+            6,
+        ),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn midnight_is_selectable_and_has_more_turns_than_every_other_track() {
+        let tracks = all_tracks();
+        let midnight = tracks.iter().find(|track| track.name == "Tokyo Midnight").unwrap();
+        let turns = |track: &Track| track.segments.iter().filter(|segment| segment.curve != 0.0).count();
+        assert!(!midnight.classic);
+        assert_eq!(midnight.music, Some(Tune::TokyoMidnight));
+        assert_eq!(turns(midnight), 22);
+        for track in tracks.iter().filter(|track| track.name != midnight.name) {
+            assert!(turns(midnight) > turns(track), "not enough turns compared with {}", track.name);
+        }
+        assert!(midnight.segments.iter().map(|segment| segment.hill).sum::<f32>().abs() < 0.001);
+        assert_eq!(midnight.height_at(0.0), midnight.height_at(midnight.length));
+    }
+
+    #[test]
+    fn midnight_layout_closes_with_varied_corner_angles_and_radii() {
+        let track = all_tracks().into_iter().find(|track| track.name == "Tokyo Midnight").unwrap();
+        let step = track.length / 16_384.0;
+        let mut heading = 0.0f32;
+        let mut horizontal = 0.0f32;
+        let mut vertical = 0.0f32;
+        for index in 0..16_384 {
+            let turn = track.curve_at((index as f32 + 0.5) * step) * step;
+            horizontal += (heading + turn * 0.5).sin() * step;
+            vertical -= (heading + turn * 0.5).cos() * step;
+            heading += turn;
+        }
+        assert!((heading - 2.0 * PI).abs() < 0.001, "finish heading does not match the start: {heading}");
+        assert!(horizontal.hypot(vertical) < 0.5, "track endpoints are separated by {} metres", horizontal.hypot(vertical));
+        let turns: Vec<_> = track.segments.iter().filter(|segment| segment.curve != 0.0).collect();
+        let angle = |segment: &Segment| segment.curve.abs() * (segment.len - (segment.len / 3.0).min(60.0));
+        assert!(turns.iter().any(|segment| angle(segment) < PI / 6.0));
+        assert!(turns.iter().filter(|segment| angle(segment) > PI * 0.49).count() >= 10);
+        assert!(turns.iter().any(|segment| segment.curve.abs() <= 0.006));
+        assert!(turns.iter().any(|segment| segment.curve.abs() >= 0.014));
+        assert!(turns.windows(2).filter(|pair| pair[0].curve * pair[1].curve < 0.0).count() >= 4);
+    }
+
+    #[test]
+    fn midnight_scenery_stays_outside_the_racing_surface() {
+        let track = all_tracks().pop().unwrap();
+        assert!(track.scenery.iter().filter(|object| matches!(object.kind, Prop::CityBuilding { .. })).count() > 200);
+        assert!(track.scenery.iter().any(|object| object.kind == Prop::Torii));
+        assert!(track.scenery.iter().any(|object| object.kind == Prop::Lantern));
+        for object in &track.scenery {
+            assert!((0.0..track.length).contains(&object.d));
+            for &(offset, half_width) in object.kind.solid() {
+                assert!((object.x + offset).abs() - half_width > ROAD_HALF);
+            }
+        }
+    }
 }

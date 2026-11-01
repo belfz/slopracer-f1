@@ -8,8 +8,9 @@ A retro pseudo-3D Formula racer for the terminal (and the browser), inspired by 
 cartridges on 8-bit Famicom-clone consoles, with PS1-inspired 3D cars
 and detailed software-rendered scenery. Written in Rust with [ratatui](https://ratatui.rs).
 Sound comes from a tiny chiptune-style synth (pulse-wave engine, beeps and noise)
-via [cpal](https://github.com/RustAudio/cpal), plus an exclusive soundtrack
-for each Japanese track.
+via [cpal](https://github.com/RustAudio/cpal) on desktop and an AudioWorklet
+in the browser, plus an exclusive soundtrack for each Japanese track.
+Browser audio runs on a separate audio thread, independent of drawing.
 
 ![Neon Sakura — perspective-rendered cars](assets/ps1-neon-sakura.png)
 ![Shirayuki Pass — winter racing](assets/ps1-shirayuki-pass.png)
@@ -38,14 +39,38 @@ web/build.sh                         # builds web/pkg
 python3 -m http.server -d web 8000   # then open http://localhost:8000
 ```
 
-`web/` is a self-contained static site (`index.html` + `pkg/`), ready for
-GitHub Pages or any static host. The browser version draws the same ratatui UI
+Deploy the entire `web/` directory, including `pkg/` and the audio `.mjs` files.
+It is a self-contained static site, ready for GitHub Pages or any static host.
+Browser audio requires HTTPS or localhost. The browser version draws the same ratatui UI
 onto a canvas with the game at full pixel resolution underneath. The browser
 always uses the highest-quality Pixels mode, without a graphics selector or
 graphics shortcut. Browsers report key releases, so you
 always hold `↑` to accelerate. Sound, gamepads, and saved settings
 (in localStorage) all work. Click or press a key to power it on: browsers only
 allow audio after a user gesture.
+
+### Development checks
+
+```sh
+cargo test --locked
+cargo clippy --all-targets --locked -- -D warnings
+cargo build --locked --bin slopracer-f1
+python3 tests/terminal-cleanup.py
+web/build.sh
+node --test tests/web-audio.mjs
+```
+
+GitHub Actions runs the native checks on Linux and macOS. It also builds fresh
+WebAssembly files before it runs the Node audio tests. These checks do not deploy
+the game or use production credentials. On Linux, install `libasound2-dev`,
+`libudev-dev`, and `pkg-config` before you run the native checks. The terminal
+cleanup test requires a Unix pseudo-terminal and the debug binary built above.
+
+For a real-browser audio stress test, install Playwright in your test environment
+and run `node --test tests/browser-audio.mjs`. You can set `PLAYWRIGHT_MODULE` to
+the absolute path of its JavaScript entry point and `CHROME_EXECUTABLE` to an
+installed Chromium browser. The test checks audio during repeated 250 ms
+main-thread stalls and checks game startup, track changes, racing, and mute.
 
 ### Deploy to Cloudflare Pages
 
@@ -100,6 +125,10 @@ costs speed, and you can't see what's behind the top of a hill. In manual mode, 
 off in the tight ones. Going off the road slows you down, and hitting a tree,
 a sign or another car sends you spinning.
 
+Choose **Car color** in the race setup menu to cycle through purple, red, blue,
+green, and yellow. The demo previews the selected color immediately. Your choice
+is saved and applies to both available tracks and to restarted races.
+
 The race HUD includes a schematic track map in the top-right corner. The gold
 marker shows your position. Blue markers show the other cars. The striped mark
 shows the start/finish line. The map follows your progress through each lap.
@@ -144,15 +173,23 @@ System Settings → Bluetooth. A micro-USB cable also works, with no pairing nee
   along a shrine approach under snowy torii, and glittering snow, to a
   breezy city-pop soundtrack.
 
+- **Tokyo Midnight**: an irregular 6.14 km moonlit city circuit with 22 turns,
+  folded infield sections, hairpins, fast boulevards, and a closing right-left
+  sequence. Its minimap follows the actual closed circuit. The scenery includes
+  neon shopfronts, tall buildings, a lit radio tower, and a lantern-lit
+  shrine district. Magenta and cyan reflections cross the dark asphalt. Its
+  original 112 BPM night-drive soundtrack combines minor-seventh pads, pulsing
+  bass, delayed arpeggios, bells, and a restrained synth lead.
+
 Each track's soundtrack previews softly in the menu when it is selected.
+
+![Tokyo Midnight — neon streets and a lantern-lit shrine](assets/ps1-tokyo-midnight.png)
 
 ### Classic tracks
 
-Three original tracks are locked by default: **Danube Ring** (sunny
+Three original tracks remain in the code but are hidden from the menu: **Danube Ring** (sunny
 parkland), **Carpathian Circuit** (twisty mountain road at sunset) and
-**Baltic Night GP** (night race under the lights). Unlock them under
-*Settings → Classics* in the menu. The choice is saved to
-`~/.config/slopracer-f1/settings` (or `$XDG_CONFIG_HOME/slopracer-f1/settings`).
+**Baltic Night GP** (night race under the lights). They have no unlock option.
 
 ![Danube Ring](assets/screenshot-day.png)
 ![Carpathian Circuit](assets/screenshot-sunset.png)

@@ -1171,6 +1171,65 @@ fn make_snow_pole() -> Bitmap {
     b
 }
 
+fn make_city_building(variant: usize) -> Bitmap {
+    let mut building = Bitmap::new(96, 192);
+    let top = [12, 40, 64, 108][variant];
+    let facade = [Rgb(28, 34, 55), Rgb(38, 29, 54), Rgb(24, 40, 58), Rgb(38, 31, 48)][variant];
+    for vertical in top..192 {
+        for horizontal in 8..90 {
+            let side = horizontal >= 72;
+            let seam = (horizontal - 8) % 16 == 0 || (vertical - top) % 18 == 0;
+            let shade = if side { 0.48 } else if seam { 0.68 } else { 1.0 };
+            building.rgb(horizontal, vertical, facade.scale(shade));
+        }
+    }
+    for vertical in top + 9..162 {
+        for horizontal in 14..87 {
+            let column = (horizontal - 14) / 11;
+            let floor = (vertical - top - 9) / 18;
+            let window = (horizontal - 14) % 11 < 5 && (vertical - top - 9) % 18 < 9;
+            if window && (column * 13 + floor * 7 + variant as i32 * 11) % 5 != 0 {
+                let light = if (column + floor) % 3 == 0 { Rgb(244, 192, 124) } else { Rgb(95, 162, 193) };
+                building.rgb(horizontal, vertical, light.scale(if horizontal >= 72 { 0.45 } else { 0.72 }));
+            }
+        }
+    }
+    for horizontal in 6..92 {
+        building.set(horizontal, top, Px::Body(0.65));
+        building.rgb(horizontal, top + 2, Rgb(65, 72, 95));
+    }
+    for vertical in top + 4..164 {
+        building.set(9, vertical, Px::Body(0.55));
+        building.set(71, vertical, Px::Body(0.75));
+    }
+    for vertical in top - 7..top {
+        for horizontal in 42..61 {
+            building.rgb(horizontal, vertical, Rgb(39, 46, 65));
+        }
+    }
+    let sign_top = top + 12;
+    neon_panel(&mut building, 72, sign_top, 20, 44);
+    kana_line(&mut building, NEON_TEXT[1 + variant % 3].0, 77, sign_top + 5, true);
+    neon_panel(&mut building, 9, 161, 64, 15);
+    kana_line(&mut building, NEON_TEXT[1 + variant % 3].0, 18, 164, false);
+    for vertical in 178..192 {
+        for horizontal in 13..69 {
+            let frame = (horizontal - 13) % 14 < 2;
+            let light = if variant == 3 { Rgb(240, 151, 83) } else { Rgb(60, 126, 150) };
+            building.rgb(horizontal, vertical, if frame { Rgb(38, 46, 64) } else { light.scale(0.65) });
+        }
+    }
+    if variant == 3 {
+        for vertical in 153..161 {
+            let inset = (160 - vertical) / 2;
+            for horizontal in 3 + inset..91 - inset {
+                building.rgb(horizontal, vertical, if vertical % 3 == 0 { Rgb(150, 69, 90) } else { Rgb(64, 34, 55) });
+            }
+        }
+    }
+    building
+}
+
 pub struct Sprites {
     pub car_rear: Bitmap,
     pub car_front: Bitmap,
@@ -1199,6 +1258,7 @@ pub struct Sprites {
     pub road_signs: Vec<Bitmap>,
     pub snowman: Bitmap,
     pub snow_pole: Bitmap,
+    pub city_buildings: Vec<Bitmap>,
 }
 
 pub const BILLBOARD_TEXT: [&str; 5] = ["SLOPRACER", "TURBO", "VOLT OIL", "F1", "ZORKA"];
@@ -1233,6 +1293,7 @@ pub fn get() -> &'static Sprites {
         road_signs: ROAD_SIGNS.iter().map(|(k, l)| make_road_sign(k, l)).collect(),
         snowman: make_snowman(),
         snow_pole: make_snow_pole(),
+        city_buildings: (0..4).map(make_city_building).collect(),
     })
 }
 
