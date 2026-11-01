@@ -178,7 +178,7 @@ fn draw_menu(frame: &mut Frame, app: &App, fb: &mut FrameBuf, sprites: &mut Vec<
         let marker = if sel { "▸ " } else { "  " };
         let style = if sel { Style::default().fg(ACCENT).add_modifier(Modifier::BOLD) } else { Style::default() };
         Line::from(vec![
-            Span::styled(format!("{marker}{label:<9}"), style),
+            Span::styled(format!("{marker}{label:<10}"), style),
             Span::styled(format!("◀ {value} ▶"), style),
         ])
     };
@@ -200,21 +200,16 @@ fn draw_menu(frame: &mut Frame, app: &App, fb: &mut FrameBuf, sprites: &mut Vec<
     } else {
         Span::styled("Input: basic (auto-throttle, hold ↓ to brake)", Style::default().fg(Color::Yellow))
     };
-    let classics = match app.locked_tracks() {
-        _ if app.settings.classic_tracks => "Unlocked".to_string(),
-        1 => "Locked (1 track)".to_string(),
-        n => format!("Locked ({n} tracks)"),
-    };
+    let mut car_color = item(MenuItem::CarColor, "Car color", app.settings.car_color.label().into());
+    car_color.spans.push(Span::styled("  ███", Style::default().fg(app.settings.car_color.rgb().to_color(app.truecolor))));
     let lines = vec![
         Line::default(),
         item(MenuItem::Track, "Track", track.name.to_string()),
-        Line::from(Span::styled(format!("             {}", track.desc), Style::default().fg(Color::Gray).italic())),
+        car_color,
         item(MenuItem::Gearbox, "Gearbox", if app.auto_gear { "Auto".into() } else { "Manual (Space)".into() }),
         item(MenuItem::Laps, "Laps", app.laps.to_string()),
-        Line::from(Span::styled("  ── Settings ──", Style::default().fg(Color::DarkGray))),
         #[cfg(not(target_arch = "wasm32"))]
         item(MenuItem::Graphics, "Graphics", app.mode.label().to_string()),
-        item(MenuItem::Classics, "Classics", classics),
         Line::default(),
         start,
         Line::default(),

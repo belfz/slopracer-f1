@@ -11,6 +11,7 @@ use std::f32::consts::TAU;
 pub enum Tune {
     NeonSakura,
     Shirayuki,
+    TokyoMidnight,
 }
 
 impl Tune {
@@ -18,6 +19,7 @@ impl Tune {
         match self {
             Tune::NeonSakura => 104.0,
             Tune::Shirayuki => 108.0,
+            Tune::TokyoMidnight => 112.0,
         }
     }
 }
@@ -28,6 +30,7 @@ const STEPS_PER_BAR: usize = 16;
 /// Two intro bars, then a 16-bar loop: 8 bars of arpeggio, 8 with the lead.
 const INTRO_BARS: usize = 2;
 const LOOP_BARS: usize = 16;
+const MAX_VOICES: usize = 64;
 
 /// A minor: Am – F – C – G, as (bass root, triad) MIDI notes.
 const CHORDS: [(u8, [u8; 3]); 4] = [(45, [57, 60, 64]), (41, [57, 60, 65]), (48, [55, 60, 64]), (43, [55, 59, 62])];
@@ -71,6 +74,24 @@ const CITY_MELODY: &[(u8, u8, u8, u8)] = &[
 /// Bass line per bar: (step, interval above the root, length in steps).
 const CITY_BASS: [(usize, u8, f32); 6] = [(0, 0, 2.6), (3, 12, 0.8), (6, 0, 1.8), (8, 7, 1.8), (11, 12, 0.8), (14, 7, 1.6)];
 
+const MIDNIGHT_CHORDS: [(u8, [u8; 4]); 8] = [
+    (42, [54, 57, 61, 64]), (38, [54, 57, 61, 66]),
+    (45, [56, 61, 64, 68]), (40, [56, 59, 62, 66]),
+    (35, [54, 57, 62, 66]), (38, [54, 57, 61, 64]),
+    (37, [56, 59, 61, 64]), (37, [53, 59, 61, 68]),
+];
+
+const MIDNIGHT_MELODY: &[(u8, u8, u8, u8)] = &[
+    (0, 2, 78, 6), (0, 10, 76, 2), (0, 12, 73, 3),
+    (1, 0, 73, 6), (1, 8, 69, 3), (1, 12, 73, 3),
+    (2, 2, 76, 6), (2, 10, 73, 2), (2, 12, 71, 3),
+    (3, 0, 68, 6), (3, 10, 71, 5),
+    (4, 2, 78, 4), (4, 8, 81, 4), (4, 12, 78, 3),
+    (5, 0, 76, 6), (5, 8, 73, 7),
+    (6, 2, 76, 4), (6, 8, 73, 4), (6, 12, 71, 3),
+    (7, 0, 73, 6), (7, 8, 68, 7),
+];
+
 fn midi(n: u8) -> f32 {
     440.0 * 2f32.powf((n as f32 - 69.0) / 12.0)
 }
@@ -83,6 +104,7 @@ enum Kind {
     Lead,
     EPiano,
     Bell,
+    Pluck,
     Kick,
     Snare,
     Hat,
@@ -104,6 +126,7 @@ impl Voice {
             Kind::Pad => 0.8,
             Kind::Lead => 0.25,
             Kind::EPiano => 0.3,
+            Kind::Pluck => 0.18,
             Kind::Bell => 0.0,
             Kind::Bass | Kind::Arp => 0.06,
             Kind::Kick | Kind::Snare | Kind::Hat => 0.0,
@@ -160,6 +183,7 @@ pub struct Music {
     tune: Option<Tune>,
     vol: f32,
     vol_target: f32,
+    pending: Option<(Option<Tune>, f32)>,
     /// Samples into the current step.
     clock: f32,
     step: usize,
@@ -179,10 +203,11 @@ impl Music {
             tune: None,
             vol: 0.0,
             vol_target: 0.0,
+            pending: None,
             clock: 0.0,
             step: 0,
             since_kick: 1.0,
-            voices: Vec::new(),
+            voices: Vec::with_capacity(MAX_VOICES),
             echo: Vec::new(),
             echo_len: 1,
             echo_pos: 0,
@@ -213,13 +238,19 @@ impl Music {
     /// current one out, then starts from the top.
     pub fn set(&mut self, tune: Option<Tune>, vol: f32) {
         if tune == self.tune {
+            self.pending = None;
             self.vol_target = if tune.is_some() { vol } else { 0.0 };
             return;
         }
-        if self.tune.is_some() && self.vol > 0.01 {
+        if self.tune.is_some() {
+            self.pending = Some((tune, vol));
             self.vol_target = 0.0;
             return;
         }
+        self.start(tune, vol);
+    }
+
+    fn start(&mut self, tune: Option<Tune>, vol: f32) {
         self.tune = tune;
         self.step = 0;
         self.clock = 0.0;
@@ -229,14 +260,17 @@ impl Music {
         self.vol_target = if tune.is_some() { vol } else { 0.0 };
     }
 
-    fn noise(&mut self) -> f32 {
-        self.rng ^= self.rng << 13;
-        self.rng ^= self.rng >> 17;
-        self.rng ^= self.rng << 5;
-        self.rng as f32 / u32::MAX as f32 * 2.0 - 1.0
+    fn noise(rng: &mut u32) -> f32 {
+        *rng ^= *rng << 13;
+        *rng ^= *rng >> 17;
+        *rng ^= *rng << 5;
+        *rng as f32 / u32::MAX as f32 * 2.0 - 1.0
     }
 
     fn play(&mut self, kind: Kind, note: u8, steps: f32, vol: f32) {
+        if self.voices.len() == MAX_VOICES {
+            return;
+        }
         let gate = steps * 60.0 / self.bpm() / 4.0;
         let freq = if note == 0 { 0.0 } else { midi(note) };
         self.voices.push(Voice { kind, freq, t: 0.0, gate, vol, ph: [0.0, 0.33, 0.66], lp: [0.0; 2] });
@@ -249,6 +283,7 @@ impl Music {
         let bar = if intro { bar_abs } else { (bar_abs - INTRO_BARS) % LOOP_BARS };
         match self.tune {
             Some(Tune::Shirayuki) => self.city_step(bar, st, intro),
+            Some(Tune::TokyoMidnight) => self.midnight_step(bar, st, intro),
             _ => self.synth_step(bar, st, intro),
         }
         self.step = (self.step + 1) % ((INTRO_BARS + LOOP_BARS) * STEPS_PER_BAR);
@@ -307,9 +342,10 @@ impl Music {
         }
         if with_lead {
             let lb = (bar - 8) as u8;
-            let notes: Vec<_> = CITY_MELODY.iter().filter(|m| m.0 == lb && m.1 as usize == st).copied().collect();
-            for (_, _, n, len) in notes {
-                self.play(Kind::Lead, n, len as f32 - 0.3, 0.085);
+            for &(phrase, position, note, length) in CITY_MELODY {
+                if phrase == lb && position as usize == st {
+                    self.play(Kind::Lead, note, length as f32 - 0.3, 0.085);
+                }
             }
         }
     }
@@ -347,9 +383,57 @@ impl Music {
 
         if with_lead {
             let lb = (bar - 8) as u8;
-            let notes: Vec<_> = MELODY.iter().filter(|m| m.0 == lb && m.1 as usize == st).copied().collect();
-            for (_, _, n, len) in notes {
-                self.play(Kind::Lead, n, len as f32 - 0.3, 0.11);
+            for &(phrase, position, note, length) in MELODY {
+                if phrase == lb && position as usize == st {
+                    self.play(Kind::Lead, note, length as f32 - 0.3, 0.11);
+                }
+            }
+        }
+    }
+
+    fn midnight_step(&mut self, bar: usize, step: usize, intro: bool) {
+        let (root, chord) = MIDNIGHT_CHORDS[bar % MIDNIGHT_CHORDS.len()];
+        let with_lead = !intro && bar >= 8;
+        if step == 0 {
+            for note in chord {
+                self.play(Kind::Pad, note, 15.5, 0.034);
+            }
+            if intro {
+                self.play(Kind::Bass, root, 6.0, 0.15);
+            }
+        }
+        if !intro {
+            if step.is_multiple_of(4) || (bar % 4 == 3 && step == 14) {
+                self.play(Kind::Kick, 0, 1.0, if step == 14 { 0.4 } else { 0.66 });
+                self.since_kick = 0.0;
+            }
+            if step == 4 || step == 12 {
+                self.play(Kind::Snare, 0, 1.0, 0.24);
+            } else if bar % 4 == 3 && step == 15 {
+                self.play(Kind::Snare, 0, 1.0, 0.08);
+            }
+            if step.is_multiple_of(2) || (bar % 4 == 3 && step >= 13) {
+                self.play(Kind::Hat, 0, 1.0, if step % 4 == 2 { 0.066 } else { 0.027 });
+            }
+            for (position, interval, length) in [(0, 0, 2.4), (3, 12, 0.8), (6, 0, 1.4), (8, 0, 2.4), (11, 7, 0.8), (14, 12, 1.4)] {
+                if step == position {
+                    self.play(Kind::Bass, root + interval, length, 0.28);
+                }
+            }
+        }
+        if step.is_multiple_of(2) {
+            let pattern = [0, 2, 1, 3, 2, 1, 3, 2];
+            let note = chord[pattern[step / 2]] + 12;
+            self.play(Kind::Pluck, note, 1.15, if with_lead { 0.052 } else { 0.075 });
+        }
+        if step == 6 || step == 14 {
+            self.play(Kind::Bell, chord[(bar + step / 2) % 4] + 24, 1.0, 0.033);
+        }
+        if with_lead {
+            for &(phrase, position, note, duration) in MIDNIGHT_MELODY {
+                if phrase as usize == bar - 8 && position as usize == step {
+                    self.play(Kind::Lead, note, duration as f32 - 0.4, 0.078);
+                }
             }
         }
     }
@@ -363,7 +447,12 @@ impl Music {
             // Faded out: stop, so a different tune can start.
             self.tune = None;
             self.voices.clear();
-            return 0.0;
+            if let Some((tune, volume)) = self.pending.take() {
+                self.start(tune, volume);
+            }
+            if self.tune.is_none() {
+                return 0.0;
+            }
         }
         let step_len = 60.0 / self.bpm() / 4.0 * self.sr;
         let city = self.tune == Some(Tune::Shirayuki);
@@ -377,14 +466,6 @@ impl Music {
         self.since_kick += dt;
         let pump = 1.0 - if city { 0.2 } else { 0.55 } * (-self.since_kick * 9.0).exp();
         let (mut dry, mut send) = (0.0f32, 0.0f32);
-        let mut noise_needed = 0;
-        for v in &self.voices {
-            if matches!(v.kind, Kind::Snare | Kind::Hat) {
-                noise_needed += 1;
-            }
-        }
-        let noises: Vec<f32> = (0..noise_needed).map(|_| self.noise()).collect();
-        let mut ni = 0;
         let sr = self.sr;
         for v in &mut self.voices {
             let env = v.env();
@@ -455,14 +536,22 @@ impl Music {
                     send += o;
                     o
                 }
+                Kind::Pluck => {
+                    v.ph[0] = (v.ph[0] + v.freq * dt).fract();
+                    v.ph[1] = (v.ph[1] + v.freq * 2.005 * dt).fract();
+                    let fundamental = (v.ph[0] * TAU).sin();
+                    let overtone = (v.ph[1] * TAU).sin() * 0.42 * (-v.t * 12.0).exp();
+                    let output = (fundamental + overtone) * (-v.t * 3.5).exp() * env * v.vol;
+                    send += output * 0.85;
+                    output * pump
+                }
                 Kind::Kick => {
                     let f = 48.0 + 130.0 * (-v.t * 32.0).exp();
                     v.ph[0] = (v.ph[0] + f * dt).fract();
                     (v.ph[0] * TAU).sin() * (-v.t * 7.0).exp() * v.vol
                 }
                 Kind::Snare => {
-                    let n = noises[ni];
-                    ni += 1;
+                    let n = Self::noise(&mut self.rng);
                     v.ph[0] = (v.ph[0] + 185.0 * dt).fract();
                     let body = (v.ph[0] * TAU).sin() * (-v.t * 25.0).exp() * 0.5;
                     // Big gated-reverb tail, cut off sharply.
@@ -472,8 +561,7 @@ impl Music {
                     o
                 }
                 Kind::Hat => {
-                    let n = noises[ni];
-                    ni += 1;
+                    let n = Self::noise(&mut self.rng);
                     n * (-v.t * 55.0).exp() * v.vol
                 }
             };
@@ -503,6 +591,7 @@ mod tests {
     fn tunes_render_cleanly() {
         render_tune(Tune::NeonSakura, "neon_sakura.wav");
         render_tune(Tune::Shirayuki, "shirayuki.wav");
+        render_tune(Tune::TokyoMidnight, "tokyo_midnight.wav");
     }
 
     fn render_tune(tune: Tune, file: &str) {
@@ -558,5 +647,23 @@ mod tests {
             last = m.next_sample();
         }
         assert!(last.abs() < 1e-3 && m.tune.is_none());
+    }
+
+    #[test]
+    fn a_single_track_change_finishes_the_fade_without_frame_updates() {
+        let mut music = Music::new(8_000.0);
+        music.set(Some(Tune::NeonSakura), 1.0);
+        for _ in 0..8_000 { music.next_sample(); }
+        music.set(Some(Tune::TokyoMidnight), 1.0);
+        for _ in 0..80_000 { assert!(music.next_sample().is_finite()); }
+        assert_eq!(music.tune, Some(Tune::TokyoMidnight));
+        assert!(music.pending.is_none());
+        assert!(music.vol > 0.99);
+        music.set(Some(Tune::Shirayuki), 0.45);
+        music.set(Some(Tune::TokyoMidnight), 0.45);
+        assert!(music.pending.is_none());
+        for _ in 0..16_000 { music.next_sample(); }
+        assert_eq!(music.tune, Some(Tune::TokyoMidnight));
+        assert!((music.vol - 0.45).abs() < 0.001);
     }
 }

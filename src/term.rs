@@ -15,6 +15,7 @@ use ratatui::crossterm::{
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io::{self, stdout};
+use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
 use std::time::{Duration, Instant};
 
 const FRAME: Duration = Duration::from_millis(16);
@@ -38,6 +39,20 @@ fn restore_terminal(enhanced: bool, pixels: bool) {
     }
     let _ = execute!(out, LeaveAlternateScreen, cursor::Show);
     let _ = terminal::disable_raw_mode();
+}
+
+struct TerminalSession {
+    enhanced: bool,
+    pixels: bool,
+    restored: Arc<AtomicBool>,
+}
+
+impl Drop for TerminalSession {
+    fn drop(&mut self) {
+        if !self.restored.swap(true, Ordering::Relaxed) {
+            restore_terminal(self.enhanced, self.pixels);
+        }
+    }
 }
 
 pub fn main() -> io::Result<()> {
@@ -64,9 +79,11 @@ pub fn main() -> io::Result<()> {
     };
 
     terminal::enable_raw_mode()?;
+    let mut session = TerminalSession { enhanced: false, pixels: pixels_available, restored: Arc::new(AtomicBool::new(false)) };
     execute!(stdout(), EnterAlternateScreen, cursor::Hide)?;
     let enhanced = matches!(terminal::supports_keyboard_enhancement(), Ok(true));
     if enhanced {
+        session.enhanced = true;
         execute!(
             stdout(),
             PushKeyboardEnhancementFlags(
@@ -75,14 +92,15 @@ pub fn main() -> io::Result<()> {
         )?;
     }
     let default_hook = std::panic::take_hook();
+    let restored = session.restored.clone();
     std::panic::set_hook(Box::new(move |info| {
-        restore_terminal(enhanced, pixels_available);
+        if !restored.swap(true, Ordering::Relaxed) {
+            restore_terminal(enhanced, pixels_available);
+        }
         default_hook(info);
     }));
 
-    let result = run(enhanced, truecolor, muted, mode, pixels_available, !has("--no-intro"));
-    restore_terminal(enhanced, pixels_available);
-    result
+    run(enhanced, truecolor, muted, mode, pixels_available, !has("--no-intro"))
 }
 
 fn key_event(k: event::KeyEvent) -> KeyEvent {

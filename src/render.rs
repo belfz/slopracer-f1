@@ -9,6 +9,9 @@ use std::f32::consts::TAU;
 #[path = "motorsport.rs"]
 mod motorsport;
 
+#[path = "night_city.rs"]
+mod night_city;
+
 /// Distance (m) from the camera to the ground at the bottom screen row.
 pub const Z_NEAR: f32 = 4.0;
 /// Distance from the camera to the player's car.
@@ -228,7 +231,8 @@ fn draw_road_row(fb: &mut FrameBuf, y: usize, cx: f32, scale: f32, d: f32, span:
     let pal = &track.palette;
     let stripe = ((d / STRIPE).floor() as i64).rem_euclid(2) as usize;
     let f = |c: Rgb| c.lerp(pal.fog, fog);
-    let grass_base = if pal.snow || pal.grid.is_some() { pal.grass[stripe] } else { pal.grass[stripe].lerp(Rgb(91, 110, 60), 0.32) };
+    let midnight = pal.backdrop == Backdrop::Midnight;
+    let grass_base = if pal.snow || pal.grid.is_some() || midnight { pal.grass[stripe] } else { pal.grass[stripe].lerp(Rgb(91, 110, 60), 0.32) };
     let grass = f(grass_base);
     let road_base = pal.road[0].lerp(pal.road[1], 0.5).lerp(pal.road[stripe], 0.18);
     let road = f(road_base);
@@ -270,11 +274,25 @@ fn draw_road_row(fb: &mut FrameBuf, y: usize, cx: f32, scale: f32, d: f32, span:
                 let grain = (hash(cell.wrapping_mul(73_856_093) ^ texture_row.wrapping_mul(19_349_663)) & 255) as f32 / 255.0 - 0.5;
                 let groove = (1.0 - ((a - 2.1) / 0.40).abs()).max(0.0);
                 let rubber = groove * rubber_amount;
-                road.scale(1.0 + grain * 0.11 * detail - rubber * (1.0 - fog))
+                let asphalt = road.scale(1.0 + grain * 0.11 * detail - rubber * (1.0 - fog));
+                if midnight {
+                    let neon = if rel < 0.0 { Rgb(220, 50, 150) } else { Rgb(45, 175, 215) };
+                    let streak = (1.0 - ((a - 3.5) / 1.3).abs()).max(0.0);
+                    let pulse = (d * 0.19635).sin() * 0.5 + 0.5;
+                    let broken = 0.5 + 0.5 * (d * 8.0 + rel * 3.0).sin().abs();
+                    asphalt.lerp(f(neon), streak * pulse * broken * 0.32 * (1.0 - fog))
+                } else {
+                    asphalt
+                }
             }
         } else if a <= ROAD_HALF + 0.9 {
             let bevel = ((a - ROAD_HALF) / 0.9 * 3.0).floor() / 3.0;
             rumble.scale(1.06 - bevel * 0.18)
+        } else if midnight {
+            let seam = rel.rem_euclid(2.0) < 0.05 || d.rem_euclid(4.0) < 0.06;
+            let curb = a < ROAD_HALF + 1.2;
+            let tile = if curb { Rgb(72, 85, 108) } else if seam { Rgb(13, 17, 30) } else { pal.grass[stripe] };
+            f(tile)
         } else if let Some((line, cross, ground)) = grid {
             let along = (rel.rem_euclid(GRID) < GRID_LINE) as u8 as f32;
             ground.lerp(line, along.max(cross))
@@ -369,8 +387,8 @@ fn draw_sprite(fb: &mut FrameBuf, s: &SpriteInst, cx: f32, base: f32, wpx: f32, 
                     }
                 }
             }
-            if hits > 0 {
-                let c = Rgb((r / hits) as u8, (g / hits) as u8, (b / hits) as u8).scale(light).lerp(fogc, fog);
+            if let Some(sample_count) = std::num::NonZeroU32::new(hits) {
+                let c = Rgb((r / sample_count) as u8, (g / sample_count) as u8, (b / sample_count) as u8).scale(light).lerp(fogc, fog);
                 let alpha = hits as f32 / (ns * ns) as f32 * row_clip;
                 fb.blend(px, py, c, alpha);
             }
@@ -487,6 +505,7 @@ fn draw_backdrop(fb: &mut FrameBuf, v: &View, pal: &Palette, bg: f32, time: f32)
     match pal.backdrop {
         Backdrop::Synth => return draw_synth_backdrop(fb, v, pal, bg, time),
         Backdrop::Winter => return draw_winter_backdrop(fb, v, pal, bg, time),
+        Backdrop::Midnight => return night_city::draw(fb, v, pal, bg),
         _ => {}
     }
 
@@ -530,7 +549,7 @@ fn draw_backdrop(fb: &mut FrameBuf, v: &View, pal: &Palette, bg: f32, time: f32)
                 }
             }
         }
-        Backdrop::Synth | Backdrop::Winter => unreachable!(),
+        Backdrop::Synth | Backdrop::Winter | Backdrop::Midnight => unreachable!(),
         Backdrop::City => {
             let cols = 34.0;
             for x in 0..w {
@@ -1040,6 +1059,26 @@ mod tests {
             race.sprites(&mut sprites);
             render_world(&mut frame, &race.track, &camera, &mut sprites, race.time, 1.0);
             write_ppm(&directory.join(format!("race-{index}.ppm")), frame.w, frame.h, |pixel_x, pixel_y| frame.get(pixel_x, pixel_y));
+        }
+    }
+
+    #[test]
+    fn midnight_showcase_frames() {
+        let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/screenshots/midnight");
+        std::fs::create_dir_all(&directory).unwrap();
+        let track = Rc::new(all_tracks().into_iter().find(|track| track.name == "Tokyo Midnight").unwrap());
+        let mut race = Race::new(track.clone(), 3, false, true);
+        race.x = 0.0;
+        race.rivals.clear();
+        let mut frame = FrameBuf::new();
+        frame.resize(800, 448);
+        for (name, distance, background) in [("boulevard", 80.0, 0.0), ("chicane", 530.0, 0.13), ("shrine", 1700.0, 0.3), ("skyline", 2680.0, -0.2)] {
+            race.d = distance;
+            let mut sprites = Vec::new();
+            race.sprites(&mut sprites);
+            render_world(&mut frame, &track, &Camera { d: race.cam_d(), x: 0.0, bg: background }, &mut sprites, 12.0, 1.0);
+            assert!((0..frame.w).any(|horizontal| frame.get(horizontal, frame.h / 2) != Rgb::default()));
+            write_ppm(&directory.join(format!("{name}.ppm")), frame.w, frame.h, |horizontal, vertical| frame.get(horizontal, vertical));
         }
     }
 

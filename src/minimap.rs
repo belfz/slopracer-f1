@@ -23,8 +23,17 @@ pub(crate) struct TrackMap {
 
 impl TrackMap {
     pub(crate) fn from_track(track: &Track) -> Self {
-        let step = track.length / SAMPLES as f32;
-        let turns: Vec<_> = (0..SAMPLES).map(|index| track.curve_at((index as f32 + 0.5) * step) * step).collect();
+        Self::from_curvature(track, false)
+    }
+
+    pub(crate) fn from_closed_track(track: &Track) -> Self {
+        Self::from_curvature(track, true)
+    }
+
+    fn from_curvature(track: &Track, closed: bool) -> Self {
+        let substeps = if closed { 16 } else { 1 };
+        let step = track.length / (SAMPLES * substeps) as f32;
+        let turns: Vec<_> = (0..SAMPLES * substeps).map(|index| track.curve_at((index as f32 + 0.5) * step) * step).collect();
         let right: f32 = turns.iter().map(|turn| turn.max(0.0)).sum();
         let left: f32 = turns.iter().map(|turn| (-turn).max(0.0)).sum();
         let reverse_turns = if right > 0.0 && left > 0.0 { TAU * 0.35 } else { 0.0 };
@@ -33,8 +42,10 @@ impl TrackMap {
         let mut heading = 0.0f32;
         let mut point = Point::default();
         let mut points = vec![point];
-        for turn in turns {
-            let turn = if right + left < 0.0001 {
+        for (index, turn) in turns.into_iter().enumerate() {
+            let turn = if closed {
+                turn
+            } else if right + left < 0.0001 {
                 TAU / SAMPLES as f32
             } else if turn >= 0.0 {
                 turn * right_target / right.max(0.0001)
@@ -45,7 +56,9 @@ impl TrackMap {
             point.horizontal += direction.sin() * step;
             point.vertical -= direction.cos() * step;
             heading += turn;
-            points.push(point);
+            if (index + 1).is_multiple_of(substeps) {
+                points.push(point);
+            }
         }
         let endpoint = point;
         for (index, point) in points.iter_mut().enumerate() {
@@ -229,6 +242,32 @@ mod tests {
             }
             for other in &tracks[..index] {
                 assert!(map.points.iter().zip(&other.minimap.points).any(|(&first, &second)| separation(first, second) > 0.1));
+            }
+        }
+    }
+
+    #[test]
+    fn midnight_map_has_deep_infield_sections_without_crossings() {
+        let track = all_tracks().into_iter().find(|track| track.name == "Tokyo Midnight").unwrap();
+        let map = &track.minimap;
+        let perimeter: f32 = map.points.windows(2).map(|pair| separation(pair[0], pair[1])).sum();
+        let area = map.points.windows(2).map(|pair| pair[0].horizontal * pair[1].vertical - pair[1].horizontal * pair[0].vertical).sum::<f32>().abs() * 0.5;
+        let circularity = 2.0 * TAU * area / (perimeter * perimeter);
+        assert!(circularity < 0.55, "Tokyo must not return to a circular outline: {circularity}");
+        let cross = |start: Point, end: Point, point: Point| {
+            (end.horizontal - start.horizontal) * (point.vertical - start.vertical)
+                - (end.vertical - start.vertical) * (point.horizontal - start.horizontal)
+        };
+        for first in 0..SAMPLES {
+            for second in first + 2..SAMPLES {
+                if first == 0 && second == SAMPLES - 1 { continue; }
+                let first_start = map.points[first];
+                let first_end = map.points[first + 1];
+                let second_start = map.points[second];
+                let second_end = map.points[second + 1];
+                let intersects = cross(first_start, first_end, second_start) * cross(first_start, first_end, second_end) < 0.0
+                    && cross(second_start, second_end, first_start) * cross(second_start, second_end, first_end) < 0.0;
+                assert!(!intersects, "Tokyo map crosses itself at samples {first} and {second}");
             }
         }
     }
